@@ -181,13 +181,22 @@ def paste_cover_letter(cover_letter: str, max_scrolls: int = 8) -> bool:
 # ============================================================================
 # Screening questions
 #
-# Upwork renders question textareas as contenteditable divs that UIA does NOT
-# surface, even when fully in the viewport. So we use a hybrid:
-#   1. UIA enumerates question *labels* by scrolling and observing (cheap,
-#      reliable — text elements are exposed normally).
-#   2. For each label, we screenshot the page and ask gpt-4o-mini for the
-#      textarea bounding box (vision.find_textarea_for_question).
-#   3. Click those coordinates, paste the answer via clipboard.
+# Hybrid: vision identifies WHICH questions exist, UIA tells us WHERE they are.
+#
+#   1. Discovery — vision.list_visible_questions() scrolls through the form
+#      region and at each scroll position asks gpt-4o-mini what client
+#      screening questions are visible. Vision rejects page chrome (Job
+#      details, Terms, Bid section, Profile highlights) far better than any
+#      UIA text-shape heuristic could.
+#   2. Localization — once we know a question's text, UIA reliably exposes
+#      the matching label as a 'text' element with bounds. We click ~80px
+#      below the label, which lands inside the textarea (Upwork's textareas
+#      sit immediately below their labels with consistent padding).
+#
+# We tried asking vision for the textarea bounding box directly, but
+# gpt-4o-mini's spatial reasoning on screenshots is unreliable for pixel
+# coordinates — kept returning the same generic 'y=100-200' band. UIA
+# bounds are an order of magnitude more accurate for this.
 # ============================================================================
 
 # Anchor texts that mark the end of the questions region (everything below is
@@ -293,14 +302,45 @@ def _load_portfolio_text() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _find_label_bounds_via_uia(label_text: str):
+    """Find the UIA text element whose name contains `label_text` (prefix
+    match, case-insensitive). Return its bounds tuple or None."""
+    needle = label_text.lower()[:80]
+    try:
+        obs = observe.observe(
+            window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
+        )
+    except Exception:
+        return None
+    for e in obs.elements:
+        if e.role != "text":
+            continue
+        n = (e.name or "").strip().lower()
+        if needle in n:
+            return e.bounds
+    return None
+
+
 def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: bool = False) -> int:
-    """For each question label: scroll to it, ask vision for the textarea
-    coords, generate an answer, click + paste. Returns number answered."""
+    """For each question label: scroll to it, locate label via UIA, click into
+    the textarea immediately below the label, paste the LLM answer.
+
+    Why UIA + offset instead of vision bbox: gpt-4o-mini's spatial reasoning
+    on screenshots is unreliable for pixel coordinates (returned 'y=100-200'
+    band even when the textarea was halfway down the page). UIA reliably
+    gives us the label's bounds, and Upwork's textareas always sit ~10-30px
+    immediately below their label — a fixed offset is more reliable than
+    asking vision to do bbox localization.
+    """
     if not question_labels:
         log("  No screening questions detected.")
         return 0
     portfolio_text = _load_portfolio_text()
     answered = 0
+    # How far below the label center to click — empirically the textarea body
+    # starts ~10-30px below the label-baseline. We click ~80px below the
+    # label-top to land comfortably inside the textarea body.
+    label_to_textarea_offset_y = 80
     for i, label in enumerate(question_labels, 1):
         log(f"  Q{i}: {label[:120]}")
 
@@ -317,27 +357,29 @@ def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: b
             continue
         log(f"    A{i}: {answer[:160]!r}")
 
-        # Bring the question into view (always — dry-run still validates that
-        # scrolling + vision can locate the textarea)
+        # Bring the question into view
         if not scroll_to_label(label):
             log(f"    could not scroll to label — skipping")
             continue
         time.sleep(0.4)
 
-        # Ask vision for the textarea bounding box
-        bb = vision.find_textarea_for_question(label, debug_log=log)
-        if bb is None:
-            log(f"    vision could not locate textarea — skipping")
+        # Find the label's UIA bounds, derive a click target inside the textarea
+        bounds = _find_label_bounds_via_uia(label)
+        if bounds is None:
+            log(f"    UIA didn't expose label after scroll — skipping")
             continue
+        l, t, r, b = bounds
+        cx = (l + r) // 2
+        cy = b + label_to_textarea_offset_y  # below the label's bottom edge
+        log(f"    label bounds={bounds}, click target=({cx}, {cy})")
 
-        cx, cy = bb.center
         if dry_run:
             log(f"    [dry-run] would click ({cx}, {cy}) — not clicking.")
             answered += 1
             continue
 
         log(f"    clicking textarea at ({cx}, {cy})")
-        act.click_xy(cx, cy)  # require_focus inside act.click_xy handles window focus
+        act.click_xy(cx, cy)
         time.sleep(0.4)
         pyperclip.copy(answer)
         time.sleep(0.2)
