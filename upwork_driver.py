@@ -758,6 +758,10 @@ def main():
     jobs_store.ensure_dirs()
     llm = OpenAI()
 
+    # Configure the target window once: every input primitive will now verify
+    # focus against this name and raise act.FocusLost on miss.
+    act.set_target_window(WINDOW)
+
     log(f"Focusing window: {WINDOW!r}")
     if not act.focus_window(WINDOW):
         print(f"Could not focus a window with title containing {WINDOW!r}.", file=sys.stderr)
@@ -845,209 +849,221 @@ def main():
             seen_titles.add(feed_info.title)
             evaluated += 1
 
-            log(f"[{evaluated}/{args.max_jobs}] {feed_info.title[:80]}")
-
-            # 1. Open the panel — single source of truth for data.
-            # Slow connections render content gradually; give it a generous wait.
-            act.focus_window(WINDOW)
-            act.click(title_el)
-            time.sleep(3.0)
-
-            # 2. Read the panel
             try:
-                info = collect_panel_info(WINDOW, expected_title=feed_info.title)
-            except Exception as ex:
-                log(f"  ERROR reading panel: {ex}")
-                act.focus_window(WINDOW)
-                act.key("escape")
-                time.sleep(0.5)
-                skipped += 1
-                continue
+                log(f"[{evaluated}/{args.max_jobs}] {feed_info.title[:80]}")
 
-            log(f"  Posted:  {info.posted or '(none)'}")
-            log(f"  Budget:  {info.budget or '(none)'}")
-            log(f"  Client:  {info.client_summary or '(none)'}")
-            log(f"  Tags:    {', '.join(info.tags or [])[:120]}")
-            log(f"  Desc:    {len(info.description)} chars")
-
-            # If panel data is empty, the click likely didn't open the panel.
-            # Try a cheap, non-destructive retry first: just click the title
-            # again and wait longer. Avoid reload — reload shuffles the feed
-            # state and loses our position.
-            if len(info.description) < 80 and not info.budget:
-                log(f"  -> Panel didn't open — retrying click (no reload)")
+                # 1. Open the panel — single source of truth for data.
+                # Slow connections render content gradually; give it a generous wait.
                 act.focus_window(WINDOW)
-                act.key("escape")
-                time.sleep(0.5)
                 act.click(title_el)
-                time.sleep(4.0)  # generous wait this time
+                time.sleep(3.0)
 
+                # 2. Read the panel
                 try:
                     info = collect_panel_info(WINDOW, expected_title=feed_info.title)
                 except Exception as ex:
-                    log(f"  -> SKIP (retry collect failed: {ex})")
+                    log(f"  ERROR reading panel: {ex}")
                     act.focus_window(WINDOW)
                     act.key("escape")
                     time.sleep(0.5)
                     skipped += 1
                     continue
 
-                if len(info.description) < 80 and not info.budget:
-                    log(f"  -> SKIP (panel still didn't open after retry)")
-                    skipped += 1
-                    act.focus_window(WINDOW)
-                    act.key("escape")
-                    time.sleep(0.5)
-                    continue
-
-                log(f"  -> Retry succeeded")
                 log(f"  Posted:  {info.posted or '(none)'}")
                 log(f"  Budget:  {info.budget or '(none)'}")
                 log(f"  Client:  {info.client_summary or '(none)'}")
                 log(f"  Tags:    {', '.join(info.tags or [])[:120]}")
                 log(f"  Desc:    {len(info.description)} chars")
 
-            # 3. Judge based on real panel data
-            try:
-                is_relevant, reason = judge_relevance(llm, info, args.model)
-            except Exception as ex:
-                log(f"  LLM error: {ex}")
-                act.focus_window(WINDOW)
-                act.key("escape")
-                time.sleep(0.5)
-                skipped += 1
-                continue
+                # If panel data is empty, the click likely didn't open the panel.
+                # Try a cheap, non-destructive retry first: just click the title
+                # again and wait longer. Avoid reload — reload shuffles the feed
+                # state and loses our position.
+                if len(info.description) < 80 and not info.budget:
+                    log(f"  -> Panel didn't open — retrying click (no reload)")
+                    act.focus_window(WINDOW)
+                    act.key("escape")
+                    time.sleep(0.5)
+                    act.click(title_el)
+                    time.sleep(4.0)  # generous wait this time
 
-            if not is_relevant:
-                skipped += 1
-                log(f"  -> SKIP ({reason})")
-                act.focus_window(WINDOW)
-                act.key("escape")
-                time.sleep(0.5)
-                continue
-
-            # 4. Relevant — capture URL via Copy-to-clipboard, then close
-            log(f"  -> RELEVANT ({reason}) — capturing URL")
-            url = capture_url_via_clipboard(WINDOW)
-            info.url = url
-
-            act.focus_window(WINDOW)
-            act.key("escape")
-            time.sleep(0.5)
-
-            if not url:
-                log(f"  WARN: no URL captured. Pressing Esc to recover; continuing.")
-                act.focus_window(WINDOW)
-                act.key("escape")
-                time.sleep(0.5)
-
-            # Dedup: skip alerts/proposals if we've already pinged this URL
-            if url and url in seen_urls:
-                log(f"  -> ALREADY ALERTED (url in seen_urls.txt) — not re-pinging")
-                deduped += 1
-                continue
-
-            # Cross-status dedup: skip if this job already exists in any
-            # jobs/<status>/ directory (already queued or already applied).
-            if url:
-                try:
-                    job_id_check = jobs_store.extract_job_id(url)
-                    if jobs_store.is_known_job_id(job_id_check):
-                        log(f"  -> ALREADY IN QUEUE (job_id={job_id_check}) — not re-queuing")
-                        deduped += 1
+                    try:
+                        info = collect_panel_info(WINDOW, expected_title=feed_info.title)
+                    except Exception as ex:
+                        log(f"  -> SKIP (retry collect failed: {ex})")
+                        act.focus_window(WINDOW)
+                        act.key("escape")
+                        time.sleep(0.5)
+                        skipped += 1
                         continue
-                except ValueError:
-                    pass  # malformed URL — fall through and let later code handle it
 
-            with open(out_path, "a", encoding="utf-8") as f:
-                f.write(info.to_markdown(reason))
-            saved += 1
-            log(f"  -> SAVED  url={url or 'MISSING'}")
+                    if len(info.description) < 80 and not info.budget:
+                        log(f"  -> SKIP (panel still didn't open after retry)")
+                        skipped += 1
+                        act.focus_window(WINDOW)
+                        act.key("escape")
+                        time.sleep(0.5)
+                        continue
 
-            # Generate Doc-version proposal: structured markdown body + short
-            # cover letter that links to the Doc. Two steps:
-            #   1. LLM call to produce body + draft cover letter (with placeholder URL).
-            #   2. Composio: create Google Doc from markdown, get share URL.
-            #   3. Substitute URL into the cover letter.
-            p = None
-            try:
-                p = proposal_mod.generate_doc_proposal(
-                    job_title=info.title,
-                    description=info.description,
-                    budget=info.budget,
-                    posted=info.posted,
-                    client_summary=info.client_summary,
-                    model=args.model,
-                )
-                log(f"  -> Doc proposal drafted ({len(p.doc_markdown)} chars markdown)")
+                    log(f"  -> Retry succeeded")
+                    log(f"  Posted:  {info.posted or '(none)'}")
+                    log(f"  Budget:  {info.budget or '(none)'}")
+                    log(f"  Client:  {info.client_summary or '(none)'}")
+                    log(f"  Tags:    {', '.join(info.tags or [])[:120]}")
+                    log(f"  Desc:    {len(info.description)} chars")
 
-                # Create the Google Doc + make it shareable + insert diagram
-                doc_url = gdocs.create_proposal_doc(
-                    title=f"Proposal for {info.title[:120]}",
-                    markdown=p.doc_markdown,
-                    diagram_url=p.diagram_url or None,
-                )
-                if doc_url:
-                    p.doc_url = doc_url
-                    p.cover_letter = p.cover_letter.replace("{DOC_URL}", doc_url)
-                    log(f"  -> Google Doc created: {doc_url}")
-                else:
-                    p.cover_letter = p.cover_letter.replace("{DOC_URL}", "(doc creation failed)")
-                    log(f"  WARN: Google Doc creation failed; cover letter has no URL")
-            except Exception as ex:
-                log(f"  Proposal generation failed: {ex}")
-                p = None
-
-            # Persist this job to jobs/pending/<id>.json BEFORE we notify, so
-            # the apply queue is independent of Discord delivery.
-            if p is not None and url:
+                # 3. Judge based on real panel data
                 try:
-                    job_data = {
-                        "url": url,
-                        "title": info.title,
-                        "found_at": datetime.now().isoformat(timespec="seconds"),
-                        "budget": info.budget,
-                        "client": {"summary": info.client_summary},
-                        "skills": info.tags or [],
-                        "description": info.description,
-                        "doc_url": p.doc_url,
-                        "cover_letter": p.cover_letter,
-                        "why_relevant": reason,
-                    }
-                    queue_path = jobs_store.write_pending(job_data)
-                    log(f"  -> Queued for apply: {queue_path}")
+                    is_relevant, reason = judge_relevance(llm, info, args.model)
                 except Exception as ex:
-                    log(f"  WARN: failed to queue job for apply: {ex}")
+                    log(f"  LLM error: {ex}")
+                    act.focus_window(WINDOW)
+                    act.key("escape")
+                    time.sleep(0.5)
+                    skipped += 1
+                    continue
 
-            # Send Discord alert + proposal
-            try:
-                alert = notify.JobAlert(
-                    title=info.title,
-                    url=url,
-                    posted=info.posted,
-                    budget=info.budget,
-                    client_summary=info.client_summary,
-                    why_relevant=reason,
-                )
-                if notify.send_alert(alert):
-                    log(f"  -> Discord alert sent")
-                if p and notify.send_proposal(p.cover_letter, p.full_proposal, doc_url=p.doc_url):
-                    log(f"  -> Discord proposal sent")
-            except Exception as ex:
-                log(f"  Notify failed: {ex}")
+                if not is_relevant:
+                    skipped += 1
+                    log(f"  -> SKIP ({reason})")
+                    act.focus_window(WINDOW)
+                    act.key("escape")
+                    time.sleep(0.5)
+                    continue
 
-            # Persist URL so future cycles dedup correctly
-            if url:
-                seen_urls.add(url)
-                with open(seen_urls_path, "a", encoding="utf-8") as f:
-                    f.write(url + "\n")
+                # 4. Relevant — capture URL via Copy-to-clipboard, then close
+                log(f"  -> RELEVANT ({reason}) — capturing URL")
+                url = capture_url_via_clipboard(WINDOW)
+                info.url = url
 
-            # Pacing check
-            s = pacing.get_pacer().stats()
-            if s["actions_last_hour"] >= 0.85 * s["budget"]:
-                log(f"Pacing budget at 85% ({s['actions_last_hour']}/{s['budget']}) — stopping.")
-                pacing_stop = True
-                break
+                act.focus_window(WINDOW)
+                act.key("escape")
+                time.sleep(0.5)
+
+                if not url:
+                    log(f"  WARN: no URL captured. Pressing Esc to recover; continuing.")
+                    act.focus_window(WINDOW)
+                    act.key("escape")
+                    time.sleep(0.5)
+
+                # Dedup: skip alerts/proposals if we've already pinged this URL
+                if url and url in seen_urls:
+                    log(f"  -> ALREADY ALERTED (url in seen_urls.txt) — not re-pinging")
+                    deduped += 1
+                    continue
+
+                # Cross-status dedup: skip if this job already exists in any
+                # jobs/<status>/ directory (already queued or already applied).
+                if url:
+                    try:
+                        job_id_check = jobs_store.extract_job_id(url)
+                        if jobs_store.is_known_job_id(job_id_check):
+                            log(f"  -> ALREADY IN QUEUE (job_id={job_id_check}) — not re-queuing")
+                            deduped += 1
+                            continue
+                    except ValueError:
+                        pass  # malformed URL — fall through and let later code handle it
+
+                with open(out_path, "a", encoding="utf-8") as f:
+                    f.write(info.to_markdown(reason))
+                saved += 1
+                log(f"  -> SAVED  url={url or 'MISSING'}")
+
+                # Generate Doc-version proposal: structured markdown body + short
+                # cover letter that links to the Doc. Two steps:
+                #   1. LLM call to produce body + draft cover letter (with placeholder URL).
+                #   2. Composio: create Google Doc from markdown, get share URL.
+                #   3. Substitute URL into the cover letter.
+                p = None
+                try:
+                    p = proposal_mod.generate_doc_proposal(
+                        job_title=info.title,
+                        description=info.description,
+                        budget=info.budget,
+                        posted=info.posted,
+                        client_summary=info.client_summary,
+                        model=args.model,
+                    )
+                    log(f"  -> Doc proposal drafted ({len(p.doc_markdown)} chars markdown)")
+
+                    # Create the Google Doc + make it shareable + insert diagram
+                    doc_url = gdocs.create_proposal_doc(
+                        title=f"Proposal for {info.title[:120]}",
+                        markdown=p.doc_markdown,
+                        diagram_url=p.diagram_url or None,
+                    )
+                    if doc_url:
+                        p.doc_url = doc_url
+                        p.cover_letter = p.cover_letter.replace("{DOC_URL}", doc_url)
+                        log(f"  -> Google Doc created: {doc_url}")
+                    else:
+                        p.cover_letter = p.cover_letter.replace("{DOC_URL}", "(doc creation failed)")
+                        log(f"  WARN: Google Doc creation failed; cover letter has no URL")
+                except Exception as ex:
+                    log(f"  Proposal generation failed: {ex}")
+                    p = None
+
+                # Persist this job to jobs/pending/<id>.json BEFORE we notify, so
+                # the apply queue is independent of Discord delivery.
+                if p is not None and url:
+                    try:
+                        job_data = {
+                            "url": url,
+                            "title": info.title,
+                            "found_at": datetime.now().isoformat(timespec="seconds"),
+                            "budget": info.budget,
+                            "client": {"summary": info.client_summary},
+                            "skills": info.tags or [],
+                            "description": info.description,
+                            "doc_url": p.doc_url,
+                            "cover_letter": p.cover_letter,
+                            "why_relevant": reason,
+                        }
+                        queue_path = jobs_store.write_pending(job_data)
+                        log(f"  -> Queued for apply: {queue_path}")
+                    except Exception as ex:
+                        log(f"  WARN: failed to queue job for apply: {ex}")
+
+                # Send Discord alert + proposal
+                try:
+                    alert = notify.JobAlert(
+                        title=info.title,
+                        url=url,
+                        posted=info.posted,
+                        budget=info.budget,
+                        client_summary=info.client_summary,
+                        why_relevant=reason,
+                    )
+                    if notify.send_alert(alert):
+                        log(f"  -> Discord alert sent")
+                    if p and notify.send_proposal(p.cover_letter, p.full_proposal, doc_url=p.doc_url):
+                        log(f"  -> Discord proposal sent")
+                except Exception as ex:
+                    log(f"  Notify failed: {ex}")
+
+                # Persist URL so future cycles dedup correctly
+                if url:
+                    seen_urls.add(url)
+                    with open(seen_urls_path, "a", encoding="utf-8") as f:
+                        f.write(url + "\n")
+
+                # Pacing check
+                s = pacing.get_pacer().stats()
+                if s["actions_last_hour"] >= 0.85 * s["budget"]:
+                    log(f"Pacing budget at 85% ({s['actions_last_hour']}/{s['budget']}) — stopping.")
+                    pacing_stop = True
+                    break
+            except (act.FocusLost, observe.WaitTimeout) as ex:
+                log(f"  ERROR (recoverable): {type(ex).__name__}: {ex}")
+                log(f"  -> SKIP: trying to escape and continue with next card")
+                try:
+                    act.focus_window(WINDOW)
+                    act.key("escape")
+                except Exception:
+                    pass
+                time.sleep(1.0)
+                skipped += 1
+                continue
 
         if pacing_stop:
             break
