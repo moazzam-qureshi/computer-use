@@ -1,0 +1,9 @@
+# Research crawler queries — one per line, blank lines and `#` comments ignored.
+# These get crawled once per day by the scheduler.
+
+LLM engineer
+RAG engineer
+AI engineer
+prompt engineer
+agentic AI
+voice AI agent
