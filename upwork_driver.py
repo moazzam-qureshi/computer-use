@@ -220,30 +220,49 @@ def _find_card_end(elements: list[observe.Element], start: int, hard_end: int) -
     return hard_end
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html_tags(s: str) -> str:
+    """Remove HTML tags. Search-results pages put <span class='highlight'>...</span>
+    around matched search terms inside the Save Job button name."""
+    return _HTML_TAG_RE.sub("", s).replace("  ", " ").strip()
+
+
 def _parse_one_card(card: list[observe.Element]) -> tuple[JobInfo | None, observe.Element | None]:
     """Parse a slice of elements that belong to one job card."""
     info = JobInfo(title="", tags=[])
     title_el: observe.Element | None = None
 
-    # Canonical title from "Save job <title>" button
+    # Canonical title from "Save job <title>" button. On the search-results
+    # page (not the feed) Upwork wraps matching search terms in <span> tags
+    # inside the button name, so we strip HTML before treating it as a title.
     save_prefix = "save job "
     canonical_title = ""
     for e in card:
         if e.role == "button" and e.name.lower().startswith(save_prefix):
-            canonical_title = e.name[len(save_prefix):].strip()
+            canonical_title = _strip_html_tags(e.name[len(save_prefix):])
             break
     if not canonical_title:
         return None, None
     info.title = canonical_title
 
-    # Title hyperlink (exact match, full or truncated prefix)
+    # Title hyperlink (exact match, full or truncated prefix). Case-insensitive
+    # because Upwork's search-results page may casefold matched terms inside
+    # <span class="highlight"> tags, so the Save-Job-derived title can have
+    # different casing from the canonical hyperlink text.
+    canonical_lower = canonical_title.lower()
     for e in card:
-        if e.role == "hyperlink" and e.name.strip() == canonical_title:
+        if e.role == "hyperlink" and e.name.strip().lower() == canonical_lower:
             title_el = e
             break
     if title_el is None:
         for e in card:
-            if e.role == "hyperlink" and len(e.name) > 20 and canonical_title.startswith(e.name.strip()[:30]):
+            if (
+                e.role == "hyperlink"
+                and len(e.name) > 20
+                and canonical_lower.startswith(e.name.strip()[:30].lower())
+            ):
                 title_el = e
                 break
 
