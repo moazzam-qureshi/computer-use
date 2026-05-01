@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv init *)",
+      "Read(//c/Users/Moazzam Qureshi/AppData/Local/Google/Chrome/User Data/**)",
+      "Bash(uv run *)",
+      "WebFetch(domain:docs.composio.dev)",
+      "Bash(uv sync *)",
+      "Bash(awk 'NR>=846 && NR<=1054 {print NR\": \"$0}' upwork_driver.py)",
+      "Bash(rm -f jobs_store.py tests/test_jobs_store.py seen_urls.txt)",
+      "Bash(rm -rf jobs/)"
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+
+=== 54 elements in tree ===
+
+  id  role          name
+--------------------------------------------------------------------------------
+   0    button        Minimise
+   1    button        Maximise
+   2    button        Restore
+   3    button        Close
+   4    button        Back
+   5    button        Forward
+   6    button        Reload
+   7    button        Home
+   8    button        View site information
+   9  * edit          Address and search bar
+  10    button        Find
+  11    button        Ask AI Mode in Google Search
+  12    button        Ask Google
+  13    button        Bookmark this tab
+  14    button        Ahrefs SEO Toolbar
+Has access to this site
+  15    button        Extensions
+  16    button        Moazzam
+  17    button        Chrome
+  18    button        Managed bookmarks
+  19    button        Tab groups
+  20    button        watch
+  21    button        (2) factoring polynomials | Khan Academy

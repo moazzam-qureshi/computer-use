@@ -1,0 +1,106 @@
+{
+  "personal": {
+    "name": "Muhammad Moazzam Q.",
+    "title": "Senior AI Engineer",
+    "years_of_experience": 6,
+    "based_in": "Lahore, Pakistan",
+    "working_style": "Long-term retainers, six months or more. Weekly updates without being asked. Daily responsiveness during timezone overlap. I push back when an approach won't work and recommend simpler, cheaper solutions when they exist.",
+    "specialties": [
+      "AI agents and multi-agent systems",
+      "Custom MCP servers",
+      "Agentic RAG and document intelligence",
+      "Voice agents (ElevenLabs)",
+      "Multi-tenant AI SaaS",
+      "Production AI engineering"
+    ],
+    "stack_summary": "LangGraph, LangChain, Mastra, Pydantic AI, CrewAI, Composio, custom MCP servers, OpenAI, Claude, Gemini, ElevenLabs, FastAPI, .NET 8, Next.js, Postgres, pgvector, OpenSearch, Pinecone, Qdrant, Azure, AWS."
+  },
+
+  "projects": [
+    {
+      "name": "UK Enterprise PropTech SaaS",
+      "client_context": "UK real estate enterprise. I came in as the lead AI and backend engineer plus architect and PM, building the platform from a zero codebase.",
+      "outcome": "Live platform now onboarding paying customers. Inbound voice agents handle calls in real time, classify communications across email, SMS, and WhatsApp, and route everything through a multi-tenant backend. Each tenant gets isolated vector stores, role-based access, and an audit trail.",
+      "tech": "ElevenLabs voice with a custom Python MCP server I wrote so the agent can hit live backend data in under a second. Two-tier OpenAI assistant architecture with per-company and per-conversation vector stores. .NET 8, Azure, Clean Architecture, CQRS underneath.",
+      "relevance_tags": [
+        "voice",
+        "voice-agent",
+        "elevenlabs",
+        "multi-tenant",
+        "saas",
+        "production",
+        "mcp",
+        "openai",
+        "communications",
+        "email",
+        "sms",
+        "whatsapp",
+        "azure",
+        ".net",
+        "cqrs",
+        "enterprise"
+      ]
+    },
+
+    {
+      "name": "Enterprise Agentic RAG Platform",
+      "client_context": "Saudi AI startup building production document intelligence for enterprise search and knowledge bases.",
+      "outcome": "Production agentic RAG system handling complex document layouts at scale. Cross-language query translation, SSE streaming responses. Continuous sync with OneDrive via Microsoft Graph API so the corpus stays fresh without manual reindexing.",
+      "tech": "VLM-based page parsing for PDFs with mixed layouts. Hybrid BM25 plus vector search in OpenSearch. LangGraph agentic backend with tool use. FastAPI, Next.js, Postgres, Redis, Dramatiq.",
+      "relevance_tags": [
+        "rag",
+        "agentic-rag",
+        "document-intelligence",
+        "vlm",
+        "hybrid-search",
+        "bm25",
+        "vector-search",
+        "opensearch",
+        "langgraph",
+        "fastapi",
+        "production",
+        "onedrive",
+        "sharepoint",
+        "enterprise",
+        "streaming",
+        "sse"
+      ]
+    },
+
+    {
+      "name": "Clarilo AI",
+      "client_context": "My own product. Multi-agent executive assistant designed for autonomous goal execution.",
+      "outcome": "Connects to 900+ services through Composio, asks for human approval before any write action, and persists memory across conversations. Handles scheduled triggers and event-driven automations end to end.",
+      "tech": "Mastra for the agent framework. TypeScript and Next.js for the app layer. Postgres for persistence. Langfuse for observability. Composio for the integration breadth.",
+      "relevance_tags": [
+        "ai-agents",
+        "multi-agent",
+        "agentic-workflows",
+        "human-in-the-loop",
+        "composio",
+        "automations",
+        "mastra",
+        "scheduling",
+        "executive-assistant",
+        "integrations",
+        "observability",
+        "langfuse"
+      ]
+    }
+  ],
+
+  "instructions_for_about_me_generation": {
+    "goal": "Pick the 2-3 most relevant projects for the specific job and write a short, tailored About-me section. The reader should think 'this person has done exactly the kind of thing I need'.",
+    "rules": [
+      "Lead with the project that maps best to this job's relevance_tags.",
+      "Reframe each project around what's relevant to the client's problem, not a generic recap.",
+      "Mention specific tech only when it overlaps with the job description, otherwise stay outcome-focused.",
+      "Keep the whole section to 100-150 words.",
+      "First-person, conversational, direct.",
+      "NO em-dashes anywhere. Use commas, periods, or restructure.",
+      "NO marketing language: no 'passionate', no 'years of experience', no 'I align well', no 'I have extensive expertise'.",
+      "Don't list every project. Skip ones whose tags don't match this job.",
+      "End with one short sentence about working style if it's relevant (long-term retainer, weekly updates, etc.)."
+    ]
+  }
+}
