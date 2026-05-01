@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 
 import act
 import jobs_store
+import notify
 import observe
 import proposal
 
@@ -304,7 +305,31 @@ def main():
     answered = answer_and_paste_questions(questions, job, dry_run=args.dry_run)
     log(f"  Answered {answered}/{len(questions)} questions.")
 
-    log("Form fill complete. Awaiting-review move + Discord notify next task.")
+    if args.dry_run:
+        log("--dry-run: skipping JSON move and Discord notify.")
+        return
+
+    log("Moving job JSON to awaiting_review/...")
+    try:
+        new_path = jobs_store.move_to_status(job_path, "awaiting_review")
+        log(f"  Moved to {new_path}")
+    except Exception as ex:
+        log(f"  WARN: failed to move JSON: {ex}")
+
+    log("Sending Discord notification...")
+    try:
+        if notify.send_review_needed(
+            title=job["title"],
+            apply_url=job["apply_url"],
+            questions_answered=answered,
+        ):
+            log("  Discord notification sent.")
+        else:
+            log("  Discord notification failed.")
+    except Exception as ex:
+        log(f"  Discord error: {ex}")
+
+    log("Done. Human: review form in browser, set bid, click Submit.")
 
 
 if __name__ == "__main__":
