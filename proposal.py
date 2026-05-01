@@ -587,12 +587,13 @@ def generate_doc_proposal(
     )
 
     # Compose the Doc body. Opener is a plain paragraph (no "Here's the thing" heading).
+    # The opener ends with "Here's how I'd build it" / similar transition,
+    # so the phase list flows directly without a redundant section heading.
     doc_md_parts = [
         f"# {title}",
         "",
         opener,
         "",
-        "## How I'd approach it",
         approach,
         "",
         "## What you'd get",
