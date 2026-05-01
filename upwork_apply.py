@@ -23,7 +23,6 @@ import io
 import json
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +38,7 @@ import jobs_store
 import notify
 import observe
 import proposal
+import vision
 
 WINDOW = "Upwork"
 # Apply page renders with browser tab title "Submit a Proposal", which the
@@ -145,80 +145,166 @@ def paste_cover_letter(cover_letter: str) -> bool:
     return True
 
 
-@dataclass
-class Question:
-    label: str
-    textarea: object  # observe Element
+# ============================================================================
+# Screening questions
+#
+# Upwork renders question textareas as contenteditable divs that UIA does NOT
+# surface, even when fully in the viewport. So we use a hybrid:
+#   1. UIA enumerates question *labels* by scrolling and observing (cheap,
+#      reliable — text elements are exposed normally).
+#   2. For each label, we screenshot the page and ask gpt-4o-mini for the
+#      textarea bounding box (vision.find_textarea_for_question).
+#   3. Click those coordinates, paste the answer via clipboard.
+# ============================================================================
+
+# Section headings / page chrome that should NOT be treated as a question label.
+_NOT_A_QUESTION = frozenset({
+    "additional details",
+    "cover letter",
+    "attachments",
+    "profile highlights",
+    "boost your proposal",
+    "submit a proposal",
+    "proposal settings",
+    "job details",
+    "terms",
+    "schedule a rate increase",
+    "your bid",
+    "summary",
+    "rank",
+    "bid",
+    "now",
+    "1st place",
+    "2nd place",
+    "3rd place",
+    "4th place",
+    "remaining balance",
+})
+
+# Anchor texts that mark the end of the questions region (everything below is
+# bid / connects / submit — we must never click into that area).
+_POST_QUESTION_ANCHORS = ("attachments", "profile highlights", "boost your proposal", "send for")
 
 
-def _post_questions_y(elements) -> int | None:
-    """Return the top-y of the first section that comes AFTER screening
-    questions, or None. Anchors are headings that always appear below the
-    questions block on Upwork's apply page: 'Attachments', 'Profile highlights',
-    'Boost your proposal', 'Send for'.
+def _is_question_label(text: str) -> bool:
+    """Heuristic: is this text element a screening-question label?"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.lower() in _NOT_A_QUESTION:
+        return False
+    # Reject very short labels (likely UI chrome) and very long blocks (likely
+    # the job description copied into the apply page).
+    if len(t) < 15 or len(t) > 400:
+        return False
+    # Must contain at least one letter (ignore pure-number labels like "$10.00")
+    if not any(c.isalpha() for c in t):
+        return False
+    return True
 
-    Note: deliberately does NOT use 'bid' as an anchor because the page also
-    has 'What is the rate you'd like to bid for this job?' ABOVE cover letter
-    on hourly jobs, which would incorrectly pull the boundary too high.
-    """
-    needles = ("attachments", "profile highlights", "boost your proposal", "send for")
-    ys = []
+
+def _seen_post_question_anchor(elements) -> bool:
+    """Return True if any element's text contains a 'questions are over' anchor."""
     for e in elements:
         if e.role != "text":
             continue
         n = (e.name or "").strip().lower()
-        if any(needle in n for needle in needles):
-            ys.append(e.bounds[1])
-    return min(ys) if ys else None
+        if any(a in n for a in _POST_QUESTION_ANCHORS):
+            return True
+    return False
 
 
-def detect_screening_questions() -> list[Question]:
-    """Return a list of Question(label, textarea) for the apply form.
-    Excludes the cover-letter textarea. Returns [] if no questions found."""
-    obs = observe.observe(window_title=TARGET_WINDOWS, include_unnamed=True, include_text=True)
-    cover_letter_el = find_cover_letter_textarea()
-    cover_letter_id = cover_letter_el.id if cover_letter_el else None
+def collect_question_labels() -> list[str]:
+    """Scroll down the apply page progressively, collecting unique question
+    labels via UIA. Stops when a 'post-question' anchor (Attachments / Boost
+    your proposal / etc.) appears, or after a hard scroll cap.
 
-    cover_y = cover_letter_el.bounds[1] if cover_letter_el else 0
-    upper_bound_y = _post_questions_y(obs.elements) or 10**9
+    Caller must have already pasted the cover letter (so the cover letter
+    label is at the top of the form region we're scanning).
+    """
+    log("Scrolling page to collect question labels...")
+    # Start from a known position: scroll the cover letter into view, then
+    # progressively page down. We DON'T Ctrl+Home here because that may scroll
+    # the entire page chrome to the top; instead we let scroll_to_label handle
+    # positioning later when answering.
+    seen_labels: list[str] = []  # preserve order
+    seen_set: set[str] = set()
+    max_scrolls = 12  # safety cap
 
-    edits = [
-        e for e in _editable_elements(obs.elements)
-        if e.id != cover_letter_id
-        and e.bounds[1] > cover_y
-        and e.bounds[1] < upper_bound_y
-    ]
-    if not edits:
-        return []
+    for scroll_num in range(max_scrolls + 1):
+        try:
+            obs = observe.observe(
+                window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
+            )
+        except Exception as ex:
+            log(f"  observe failed during scroll {scroll_num}: {ex}")
+            return seen_labels
 
-    text_elems = [e for e in obs.elements if e.role == "text" and (e.name or "").strip()]
-    text_elems.sort(key=lambda e: e.bounds[1])
+        # Sort visible text elements by y so the order matches reading order
+        text_elems = [e for e in obs.elements if e.role == "text"]
+        text_elems.sort(key=lambda e: e.bounds[1])
 
-    questions: list[Question] = []
-    for textarea in edits:
-        label = ""
-        for t in text_elems:
-            if t.bounds[1] >= textarea.bounds[1]:
-                break
-            tn = t.name.strip().lower()
-            # Skip generic section labels that aren't actual questions
-            if tn in (
-                "cover letter",
-                "attachments",
-                "profile highlights",
-                "boost your proposal",
-                "submit a proposal",
-                "proposal settings",
-                "job details",
-                "terms",
-                "schedule a rate increase",
-            ):
+        new_count = 0
+        for e in text_elems:
+            label = (e.name or "").strip()
+            if not _is_question_label(label):
                 continue
-            if 5 <= len(t.name.strip()) <= 400:
-                label = t.name.strip()
-        if label:
-            questions.append(Question(label=label, textarea=textarea))
-    return questions
+            if label in seen_set:
+                continue
+            seen_set.add(label)
+            seen_labels.append(label)
+            log(f"  found Q label: {label[:100]!r}")
+            new_count += 1
+
+        if _seen_post_question_anchor(obs.elements):
+            log("  reached post-question anchor (Attachments/Boost) — stopping scroll")
+            break
+
+        if scroll_num >= max_scrolls:
+            log("  hit max_scrolls cap — stopping")
+            break
+
+        # Page down to load more content
+        act.focus_window(TARGET_WINDOWS[0])
+        act.scroll(1, method="key")  # PageDown
+        time.sleep(0.8)  # let the next batch render
+
+    log(f"  collected {len(seen_labels)} unique question label(s)")
+    return seen_labels
+
+
+def scroll_to_label(label_text: str, max_scrolls: int = 15) -> bool:
+    """Bring `label_text` into view by scrolling. First Ctrl+Home to reset,
+    then PageDown until the label appears. Returns True on success."""
+    needle = label_text.lower()[:80]  # match on a prefix in case of truncation
+    act.focus_window(TARGET_WINDOWS[0])
+    act.key("ctrl+home")
+    time.sleep(0.6)
+    for i in range(max_scrolls + 1):
+        try:
+            obs = observe.observe(
+                window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
+            )
+        except Exception:
+            time.sleep(0.5)
+            continue
+        for e in obs.elements:
+            if e.role != "text":
+                continue
+            name = (e.name or "").strip().lower()
+            if needle in name:
+                # Found it. Ideally label is in upper portion of viewport so
+                # the textarea below it is also visible. If label is too low,
+                # scroll one more PageDown.
+                top_y = e.bounds[1]
+                if top_y > 700:  # too low — bring it up
+                    act.scroll(1, method="key")
+                    time.sleep(0.5)
+                return True
+        if i < max_scrolls:
+            act.scroll(1, method="key")
+            time.sleep(0.5)
+    return False
 
 
 def _load_portfolio_text() -> str:
@@ -228,18 +314,21 @@ def _load_portfolio_text() -> str:
     return p.read_text(encoding="utf-8")
 
 
-def answer_and_paste_questions(questions: list[Question], job: dict, dry_run: bool = False) -> int:
-    """Generate an answer for each question and paste it. Returns count answered."""
-    if not questions:
+def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: bool = False) -> int:
+    """For each question label: scroll to it, ask vision for the textarea
+    coords, generate an answer, click + paste. Returns number answered."""
+    if not question_labels:
         log("  No screening questions detected.")
         return 0
     portfolio_text = _load_portfolio_text()
     answered = 0
-    for i, q in enumerate(questions, 1):
-        log(f"  Q{i}: {q.label[:120]}")
+    for i, label in enumerate(question_labels, 1):
+        log(f"  Q{i}: {label[:120]}")
+
+        # Generate the answer first (cheap if we end up not pasting)
         try:
             answer = proposal.generate_screening_answer(
-                question=q.label,
+                question=label,
                 job_description=job.get("description", ""),
                 cover_letter=job.get("cover_letter", ""),
                 portfolio_json=portfolio_text,
@@ -248,15 +337,31 @@ def answer_and_paste_questions(questions: list[Question], job: dict, dry_run: bo
             log(f"    LLM error: {ex}")
             continue
         log(f"    A{i}: {answer[:160]!r}")
+
         if dry_run:
             continue
+
+        # Bring the question into view
+        if not scroll_to_label(label):
+            log(f"    could not scroll to label — skipping")
+            continue
+        time.sleep(0.4)
+
+        # Ask vision for the textarea bounding box
+        bb = vision.find_textarea_for_question(label, debug_log=log)
+        if bb is None:
+            log(f"    vision could not locate textarea — skipping")
+            continue
+
+        cx, cy = bb.center
+        log(f"    clicking textarea at ({cx}, {cy})")
         act.focus_window(TARGET_WINDOWS[0])
-        act.click(q.textarea)
+        act.click_xy(cx, cy)
         time.sleep(0.4)
         pyperclip.copy(answer)
         time.sleep(0.2)
         act.key("ctrl+v")
-        time.sleep(0.4)
+        time.sleep(0.5)
         answered += 1
     return answered
 
@@ -319,11 +424,11 @@ def main():
             raise RuntimeError("could not find or click cover-letter textarea")
         log("Cover letter pasted.")
 
-        log("Detecting screening questions...")
-        questions = detect_screening_questions()
-        log(f"  Found {len(questions)} screening question(s).")
-        answered = answer_and_paste_questions(questions, job, dry_run=False)
-        log(f"  Answered {answered}/{len(questions)} questions.")
+        log("Collecting screening question labels (scroll + UIA)...")
+        question_labels = collect_question_labels()
+        log(f"  Found {len(question_labels)} screening question(s).")
+        answered = answer_and_paste_questions(question_labels, job, dry_run=False)
+        log(f"  Answered {answered}/{len(question_labels)} questions.")
 
         log("Moving job JSON to awaiting_review/...")
         new_path = jobs_store.move_to_status(job_path, "awaiting_review")
