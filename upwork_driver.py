@@ -32,8 +32,14 @@ from datetime import datetime
 from pathlib import Path
 
 # UTF-8 console output (Upwork descriptions can have em-dashes etc.)
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+# Only apply when running as a script — wrapping stdio at import time breaks
+# pytest's output capture and tools that import this module for its helpers.
+if __name__ == "__main__":
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import pyperclip
 from dotenv import load_dotenv

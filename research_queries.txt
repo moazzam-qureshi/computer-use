@@ -1,9 +1,35 @@
-# Research crawler queries — one per line, blank lines and `#` comments ignored.
-# These get crawled once per day by the scheduler.
+# Research crawler queries — one per line.
+# Crawled once per day by the scheduler.
+#
+# Format:
+#     <query>                                    # bare query, no filters
+#     <query> | <key>=<value>, <key>=<value>     # with filters
+#
+# Allowed filter keys (mapped to Upwork URL params):
+#     payment_verified=1         only show payment-verified clients
+#     t=0                        Hourly only
+#     t=1                        Fixed-Price only
+#     hourly_rate=25-35          $/hr range (open-ended ok: 50-)
+#     amount=500-999             Fixed-Price tier ($500-$1K). Tiers:
+#                                  0-99 / 100-499 / 500-999 / 1000-4999 / 5000-
+#     proposals=0-4              Less than 5 proposals so far. Buckets:
+#                                  0-4 / 5-9 / 10-14 / 15-19 / 20-49
+#     duration_v3=week           Project length: <1 month
+#     duration_v3=month          Project length: 1-3 months
+#     duration_v3=semester       Project length: 3-6 months
+#     duration_v3=ongoing        Project length: 6+ months
+#
+# Filters are AND-ed. Bad filter keys / typos cause the line to be skipped
+# with a warning at startup (run with no args once after editing to verify).
 
+# --- Bare exploration queries (broad market scan)
 LLM engineer
 RAG engineer
 AI engineer
-prompt engineer
 agentic AI
 voice AI agent
+
+# --- Narrowed: high-quality clients, real budgets, low competition
+ai agent developer | payment_verified=1, t=0, hourly_rate=50-, proposals=0-9
+LLM engineer | payment_verified=1, t=1, amount=1000-4999, proposals=0-9
+RAG engineer | payment_verified=1, t=0, hourly_rate=40-, duration_v3=ongoing

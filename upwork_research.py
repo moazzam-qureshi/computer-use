@@ -1,15 +1,29 @@
 """
 Upwork search crawler — market intelligence corpus builder.
 
-Drives Upwork's search box for one or more queries, scrapes the top N results
-from each search (panel-opened for ground-truth data), and writes everything
-into upwork.db. Does NOT judge relevance, generate proposals, or alert per
-job — it just builds the corpus that strategies will be derived from later.
+Drives Upwork's search via direct URL navigation (no UI button-clicking),
+scrapes the top N results from each search (panel-opened for ground-truth
+data), and writes everything into upwork.db. Does NOT judge relevance,
+generate proposals, or alert per job — it builds the corpus that strategies
+are derived from later.
+
+Query format in research_queries.txt:
+    <bare query>
+    <query> | <key=value>, <key=value>, ...
+
+Supported filter keys (mapped to Upwork URL params):
+    payment_verified=1
+    t=0  (Hourly)  |  t=1  (Fixed-Price)
+    hourly_rate=25-35  (or open-ended like 50-)
+    amount=500-999     (Fixed-price tier)
+    proposals=0-4 | 5-9 | 10-14 | 15-19 | 20-49
+    duration_v3=week | month | semester | ongoing
 
 Usage:
     uv run upwork_research.py --query "LLM engineer"
-    uv run upwork_research.py --query "AI engineer" --max-jobs 30
-    uv run upwork_research.py                          # reads research_queries.txt
+    uv run upwork_research.py --query 'ai agent developer | payment_verified=1, t=0, hourly_rate=25-'
+    uv run upwork_research.py                                       # reads research_queries.txt
+    uv run upwork_research.py --max-jobs 30
 """
 from __future__ import annotations
 
@@ -17,9 +31,10 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
-import pyperclip
 from dotenv import load_dotenv
 
 import act
@@ -44,8 +59,19 @@ TARGET_WINDOWS = (
     "Google Chrome",
 )
 
-FIND_WORK_URL = "https://www.upwork.com/nx/find-work/best-matches"
+SEARCH_URL_BASE = "https://www.upwork.com/nx/search/jobs/"
 QUERIES_FILE = Path("research_queries.txt")
+
+# Filter keys we accept. Anything else in the query line is rejected at parse
+# time so typos don't silently produce a malformed URL.
+ALLOWED_FILTER_KEYS = frozenset({
+    "payment_verified",  # =1
+    "t",                  # =0 (Hourly), =1 (Fixed-Price)
+    "hourly_rate",        # =min-max, e.g. 25-35 or 50-
+    "amount",             # =min-max for fixed-price, e.g. 500-999
+    "proposals",          # =0-4, 5-9, 10-14, 15-19, 20-49
+    "duration_v3",        # =week|month|semester|ongoing
+})
 
 
 def log(msg: str) -> None:
@@ -53,42 +79,97 @@ def log(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Query specs: parse + URL build
+# ---------------------------------------------------------------------------
+
+@dataclass
+class QuerySpec:
+    """A search query plus optional filter map. Filters get appended to the
+    URL as query params; the source string in the DB encodes them too so
+    time-series analytics can distinguish narrowing buckets.
+    """
+    query: str
+    filters: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def source(self) -> str:
+        """Stable, sorted-by-key source string for DB attribution."""
+        if not self.filters:
+            return f"search:{self.query}"
+        kv = ",".join(f"{k}={self.filters[k]}" for k in sorted(self.filters))
+        return f"search:{self.query}|{kv}"
+
+    @property
+    def url(self) -> str:
+        """Build the Upwork search URL with all filters applied. Spaces in
+        the query are encoded as %20 to match Upwork's own URLs."""
+        params = ["from_recent_search=true", f"q={quote(self.query, safe='')}", "sort=relevance%2Bdesc"]
+        for k in sorted(self.filters):
+            params.append(f"{k}={quote(self.filters[k], safe='-')}")
+        return f"{SEARCH_URL_BASE}?{'&'.join(params)}"
+
+
+def parse_query_line(line: str) -> QuerySpec:
+    """Parse one line of research_queries.txt.
+
+    Forms:
+        "LLM engineer"
+        "ai agent developer | payment_verified=1, t=0, hourly_rate=25-35"
+
+    Raises ValueError on unknown filter keys or malformed key=value pairs."""
+    line = line.strip()
+    if "|" not in line:
+        return QuerySpec(query=line)
+    query_part, filters_part = line.split("|", 1)
+    query = query_part.strip()
+    filters: dict[str, str] = {}
+    for raw in filters_part.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if "=" not in raw:
+            raise ValueError(f"Malformed filter (no '='): {raw!r}")
+        k, v = raw.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if k not in ALLOWED_FILTER_KEYS:
+            raise ValueError(
+                f"Unknown filter key {k!r}. Allowed: {sorted(ALLOWED_FILTER_KEYS)}"
+            )
+        filters[k] = v
+    return QuerySpec(query=query, filters=filters)
+
+
+# ---------------------------------------------------------------------------
 # Query loading
 # ---------------------------------------------------------------------------
 
-def load_queries(path: Path = QUERIES_FILE) -> list[str]:
-    """Read the queries file. One per line. Blank lines and `#` comments ignored."""
+def load_queries(path: Path = QUERIES_FILE) -> list[QuerySpec]:
+    """Read the queries file. One spec per line. Blank lines and `#` comments
+    ignored. Lines that fail to parse are logged and skipped (don't crash the
+    crawler over a single bad line)."""
     if not path.exists():
         return []
-    out: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    out: list[QuerySpec] = []
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        s = raw.strip()
+        if not s or s.startswith("#"):
             continue
-        out.append(line)
+        try:
+            out.append(parse_query_line(s))
+        except ValueError as ex:
+            log(f"  WARN: line {lineno} in {path.name}: {ex}; skipping")
     return out
 
 
 # ---------------------------------------------------------------------------
-# Search input
+# Search-results loaded check
 # ---------------------------------------------------------------------------
 
-def _find_search_input():
-    """Find the search-for-jobs input on the find-work page."""
-    obs = observe.observe(window_title=TARGET_WINDOWS, include_unnamed=True, include_text=True)
-    # The search input is an `edit` whose name contains "Search for jobs".
-    for e in obs.elements:
-        if e.role != "edit":
-            continue
-        n = (e.name or "").strip().lower()
-        if "search for jobs" in n:
-            return e
-    return None
-
-
-def _wait_for_results(timeout: float = 20.0) -> bool:
+def _wait_for_results(timeout: float = 30.0) -> bool:
     """Poll until the results list renders. Anchor: the feed's 'Posted' text
-    label appears (which indicates job cards have rendered)."""
+    label appears (which indicates job cards have rendered). Generous timeout
+    to absorb Cloudflare challenges on direct URL navigation."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -103,34 +184,11 @@ def _wait_for_results(timeout: float = 20.0) -> bool:
     return False
 
 
-def perform_search(query: str) -> bool:
-    """Type `query` into the search input and submit. Returns True if results
-    rendered, False on timeout."""
-    log(f"  performing search: {query!r}")
-    el = _find_search_input()
-    if el is None:
-        log("  WARN: could not find 'Search for jobs' input on the page")
-        return False
-    log(f"  search input bounds={el.bounds}")
-    act.click(el)
-    time.sleep(0.4)
-    # Clear any existing text (Ctrl+A, then paste replaces selection)
-    act.key("ctrl+a")
-    time.sleep(0.15)
-    pyperclip.copy(query)
-    time.sleep(0.15)
-    act.key("ctrl+v")
-    time.sleep(0.3)
-    act.key("enter")
-    log("  query submitted, waiting for results...")
-    return _wait_for_results(timeout=20.0)
-
-
 # ---------------------------------------------------------------------------
 # Per-card scrape (reuses scanner panel logic)
 # ---------------------------------------------------------------------------
 
-def _scrape_one_card(conn, query: str, info_from_feed: ud.JobInfo, title_el) -> str | None:
+def _scrape_one_card(conn, source: str, info_from_feed: ud.JobInfo, title_el) -> str | None:
     """Open the panel for one card, collect panel data, capture URL, upsert + record scrape event.
     Returns the job_id on success, or None on failure (and logs why)."""
     act.click(title_el)
@@ -173,7 +231,6 @@ def _scrape_one_card(conn, query: str, info_from_feed: ud.JobInfo, title_el) -> 
         log(f"    malformed URL: {url!r}")
         return None
 
-    source = f"search:{query}"
     job_data = {
         "url": url,
         "title": info.title,
@@ -203,18 +260,19 @@ def _scrape_one_card(conn, query: str, info_from_feed: ud.JobInfo, title_el) -> 
     return job_id
 
 
-def crawl_query(conn, query: str, max_jobs: int) -> dict:
-    """Run one search query end-to-end. Returns a stats dict."""
-    log(f"=== crawling query: {query!r} ===")
-    stats = {"query": query, "scraped": 0, "new": 0, "updated": 0, "failed": 0}
+def crawl_query(conn, spec: QuerySpec, max_jobs: int) -> dict:
+    """Run one query spec end-to-end. Returns a stats dict."""
+    log(f"=== crawling: {spec.source} ===")
+    stats = {"query": spec.query, "source": spec.source, "scraped": 0, "new": 0, "updated": 0, "failed": 0}
 
-    # Navigate to find-work
-    log(f"  navigating to {FIND_WORK_URL}")
-    act.navigate(FIND_WORK_URL)
-    time.sleep(5.0)  # generous initial render
+    # Navigate directly to the constructed search URL — no UI button-clicking
+    url = spec.url
+    log(f"  navigating: {url}")
+    act.navigate(url)
+    time.sleep(3.0)
 
-    if not perform_search(query):
-        log("  results did not render; skipping query")
+    if not _wait_for_results(timeout=30.0):
+        log("  results did not render within 30s; skipping query")
         return stats
 
     # Scroll to top to make the scan deterministic
@@ -256,7 +314,7 @@ def crawl_query(conn, query: str, max_jobs: int) -> dict:
                 # _scrape_one_card does the upsert; track count via DB lookup
                 # but simpler: have it return job_id and re-check is_new through the
                 # last_scraped_at == discovered_at trick.
-                job_id = _scrape_one_card(conn, query, info_from_feed, title_el)
+                job_id = _scrape_one_card(conn, spec.source, info_from_feed, title_el)
             except (act.FocusLost, observe.WaitTimeout) as ex:
                 log(f"    recoverable error: {type(ex).__name__}: {ex}")
                 try:
@@ -313,14 +371,20 @@ def main() -> None:
     db.init_schema(conn)
 
     if args.query:
-        queries = [args.query]
+        try:
+            specs = [parse_query_line(args.query)]
+        except ValueError as ex:
+            log(f"--query is malformed: {ex}")
+            sys.exit(2)
     else:
-        queries = load_queries()
-        if not queries:
-            log(f"No --query supplied and {QUERIES_FILE} is empty/missing. Exiting.")
+        specs = load_queries()
+        if not specs:
+            log(f"No --query supplied and {QUERIES_FILE} is empty/missing/has no valid lines. Exiting.")
             sys.exit(0)
 
-    log(f"Will crawl {len(queries)} query/queries: {queries}")
+    log(f"Will crawl {len(specs)} query/queries:")
+    for s in specs:
+        log(f"  - {s.source}")
 
     # Make sure Chrome is focused
     focused = False
@@ -334,8 +398,8 @@ def main() -> None:
 
     overall = {"queries": 0, "scraped": 0, "new": 0, "updated": 0, "failed": 0}
     per_query: list[dict] = []
-    for q in queries:
-        stats = crawl_query(conn, q, args.max_jobs)
+    for spec in specs:
+        stats = crawl_query(conn, spec, args.max_jobs)
         per_query.append(stats)
         overall["queries"] += 1
         overall["scraped"] += stats["scraped"]
@@ -347,7 +411,7 @@ def main() -> None:
         f"**Research crawl complete** — {overall['queries']} queries\n"
         f"Scraped {overall['scraped']} | New: {overall['new']} | Updated: {overall['updated']} | Failed: {overall['failed']}\n"
         + "\n".join(
-            f"  • {s['query']}: scraped={s['scraped']}, new={s['new']}, updated={s['updated']}, failed={s['failed']}"
+            f"  • {s['source']}: scraped={s['scraped']}, new={s['new']}, updated={s['updated']}, failed={s['failed']}"
             for s in per_query
         )
     )
