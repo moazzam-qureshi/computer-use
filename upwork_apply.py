@@ -179,6 +179,82 @@ def paste_cover_letter(cover_letter: str, max_scrolls: int = 8) -> bool:
 
 
 # ============================================================================
+# Rate-increase frequency dropdown
+#
+# Upwork blocks proposal submission unless 'How often do you want a rate
+# increase?' is set. We pick "Never" for every job (safe, removes the block).
+#
+# UIA exposes "Select a frequency" as a text element. The actual clickable
+# dropdown opener is an unnamed parent div, so we click on the text element's
+# coordinates. After the click, observing again reveals the option listitems
+# ("Never", "Every 3 months", etc.) — we then click "Never".
+# ============================================================================
+
+
+def set_rate_increase_never(max_scrolls: int = 8) -> bool:
+    """Find the rate-increase frequency dropdown, open it, click 'Never'.
+    Returns True on success."""
+    # Scroll until 'Select a frequency' is in view. Try ctrl+home first to
+    # ensure we start from a known position (cover letter has already been
+    # filled, so re-scrolling won't lose user input).
+    act.key("ctrl+home")
+    time.sleep(0.6)
+    needle = "select a frequency"
+    dropdown_text_el = None
+    for i in range(max_scrolls + 1):
+        try:
+            obs = observe.observe(
+                window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
+            )
+        except Exception:
+            time.sleep(0.5)
+            continue
+        for e in obs.elements:
+            if e.role == "text" and needle in (e.name or "").strip().lower():
+                dropdown_text_el = e
+                break
+        if dropdown_text_el is not None:
+            break
+        if i < max_scrolls:
+            act.scroll(1, method="key")  # PageDown
+            time.sleep(0.5)
+
+    if dropdown_text_el is None:
+        log("  could not find 'Select a frequency' dropdown — skipping")
+        return False
+
+    # Click the dropdown to open it
+    l, t, r, b = dropdown_text_el.bounds
+    cx, cy = (l + r) // 2, (t + b) // 2
+    log(f"  opening rate-increase dropdown at ({cx}, {cy})")
+    act.click_xy(cx, cy)
+    time.sleep(0.8)  # let dropdown menu render
+
+    # Find the 'Never' option (listitem with name "Never")
+    try:
+        obs2 = observe.observe(
+            window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
+        )
+    except Exception as ex:
+        log(f"  observe failed after opening dropdown: {ex}")
+        return False
+
+    never_el = None
+    for e in obs2.elements:
+        if e.role == "listitem" and (e.name or "").strip().lower() == "never":
+            never_el = e
+            break
+    if never_el is None:
+        log("  'Never' option not in tree after opening dropdown")
+        return False
+
+    log(f"  clicking Never option at bounds={never_el.bounds}")
+    act.click(never_el)
+    time.sleep(0.5)
+    return True
+
+
+# ============================================================================
 # Screening questions
 #
 # Hybrid: vision identifies WHICH questions exist, UIA tells us WHERE they are.
@@ -451,6 +527,15 @@ def main():
         log(f"  Found {len(question_labels)} screening question(s).")
         answered = answer_and_paste_questions(question_labels, job, dry_run=args.dry_run)
         log(f"  Answered {answered}/{len(question_labels)} questions.")
+
+        if args.dry_run:
+            log("--dry-run: skipping rate-increase dropdown.")
+        else:
+            log("Setting rate-increase frequency to 'Never'...")
+            if not set_rate_increase_never():
+                log("  WARN: could not set rate-increase to Never — submission will be blocked")
+            else:
+                log("  Rate increase set to Never.")
 
         if args.dry_run:
             log("--dry-run: skipping JSON move and Discord notify. Done.")
