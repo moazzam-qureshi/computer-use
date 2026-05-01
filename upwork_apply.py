@@ -250,6 +250,13 @@ def pick_next_job(job_id_override: str | None) -> Path | None:
     return jobs_store.pick_newest_pending_today()
 
 
+def _move_to_failed(path: Path) -> None:
+    try:
+        jobs_store.move_to_status(path, "failed")
+    except Exception as ex:
+        log(f"  WARN: also failed to move JSON to failed/: {ex}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--job", help="Specific job-id to apply to (overrides date filter)")
@@ -277,59 +284,62 @@ def main():
         log("--dry-run: skipping navigation and form interaction.")
         return
 
-    log("Navigating to apply page...")
-    navigate_to_apply(job["apply_url"])
-
-    log("Waiting for apply form to render (10s timeout)...")
+    answered = 0
     try:
+        log("Navigating to apply page...")
+        navigate_to_apply(job["apply_url"])
+
+        log("Waiting for apply form to render (10s timeout)...")
         wait_for_apply_form(timeout=10.0)
-    except ApplyFormNotFound as ex:
-        log(f"FAIL: {ex}")
-        try:
-            jobs_store.move_to_status(job_path, "failed")
-        except Exception as mv_ex:
-            log(f"  also failed to move JSON to failed/: {mv_ex}")
-        sys.exit(3)
 
-    log("Pasting cover letter...")
-    if not paste_cover_letter(job["cover_letter"]):
-        log("FAIL: could not paste cover letter")
-        try:
-            jobs_store.move_to_status(job_path, "failed")
-        except Exception as mv_ex:
-            log(f"  also failed to move JSON to failed/: {mv_ex}")
-        sys.exit(4)
-    log("Detecting screening questions...")
-    questions = detect_screening_questions()
-    log(f"  Found {len(questions)} screening question(s).")
-    answered = answer_and_paste_questions(questions, job, dry_run=args.dry_run)
-    log(f"  Answered {answered}/{len(questions)} questions.")
+        log("Pasting cover letter...")
+        if not paste_cover_letter(job["cover_letter"]):
+            raise RuntimeError("could not find or click cover-letter textarea")
+        log("Cover letter pasted.")
 
-    if args.dry_run:
-        log("--dry-run: skipping JSON move and Discord notify.")
-        return
+        log("Detecting screening questions...")
+        questions = detect_screening_questions()
+        log(f"  Found {len(questions)} screening question(s).")
+        answered = answer_and_paste_questions(questions, job, dry_run=False)
+        log(f"  Answered {answered}/{len(questions)} questions.")
 
-    log("Moving job JSON to awaiting_review/...")
-    try:
+        log("Moving job JSON to awaiting_review/...")
         new_path = jobs_store.move_to_status(job_path, "awaiting_review")
         log(f"  Moved to {new_path}")
-    except Exception as ex:
-        log(f"  WARN: failed to move JSON: {ex}")
 
-    log("Sending Discord notification...")
-    try:
+        log("Sending Discord notification...")
         if notify.send_review_needed(
             title=job["title"],
             apply_url=job["apply_url"],
             questions_answered=answered,
         ):
             log("  Discord notification sent.")
-        else:
-            log("  Discord notification failed.")
-    except Exception as ex:
-        log(f"  Discord error: {ex}")
 
-    log("Done. Human: review form in browser, set bid, click Submit.")
+        log("Done. Human: review form in browser, set bid, click Submit.")
+    except ApplyFormNotFound as ex:
+        log(f"FAIL: {ex}")
+        _move_to_failed(job_path)
+        try:
+            notify.send_review_needed(
+                title=f"FAILED: {job['title']}",
+                apply_url=job["apply_url"],
+                questions_answered=answered,
+            )
+        except Exception:
+            pass
+        sys.exit(3)
+    except Exception as ex:
+        log(f"UNHANDLED ERROR: {type(ex).__name__}: {ex}")
+        _move_to_failed(job_path)
+        try:
+            notify.send_review_needed(
+                title=f"FAILED: {job['title']} ({type(ex).__name__})",
+                apply_url=job["apply_url"],
+                questions_answered=answered,
+            )
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
