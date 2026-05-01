@@ -40,8 +40,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 import act
+import db
 import gdocs
-import jobs_store
 import notify
 import observe
 import pacing
@@ -116,6 +116,41 @@ class JobInfo:
 
 def log(msg: str) -> None:
     print(f"[driver] {msg}", flush=True)
+
+
+def _persist_scan_to_db(conn, info: "JobInfo", url: str) -> None:
+    """Upsert a JobInfo into `jobs` and append a scrape_events row.
+
+    Called for every panel-opened card during a feed scan, regardless of
+    relevance. This is what makes the DB a complete market-research corpus.
+    """
+    import json as _json
+    job_data = {
+        "url": url,
+        "title": info.title,
+        "description": info.description,
+        "budget": info.budget,
+        "client_summary": info.client_summary,
+        "skills": info.tags or [],
+        "posted_at_text": info.posted,
+    }
+    db.upsert_job(conn, job_data, source="feed")
+    job_id = db.extract_job_id(url)
+    db.record_scrape_event(
+        conn,
+        job_id=job_id,
+        source="feed",
+        posted_at_text=info.posted,
+        raw_panel_json=_json.dumps({
+            "title": info.title,
+            "url": info.url,
+            "posted": info.posted,
+            "budget": info.budget,
+            "tags": info.tags,
+            "description": info.description,
+            "client_summary": info.client_summary,
+        }, ensure_ascii=False),
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -745,8 +780,6 @@ def main():
     ap.add_argument("--actions-per-hour", type=int, default=40)
     ap.add_argument("--reload-first", action="store_true",
                     help="Press Ctrl+R to refresh the feed before scanning")
-    ap.add_argument("--seen-urls-file", default="seen_urls.txt",
-                    help="Persisted set of URLs already alerted on")
     args = ap.parse_args()
 
     load_dotenv()
@@ -755,7 +788,8 @@ def main():
         sys.exit(1)
 
     pacing.configure(pacing.PacingConfig(max_actions_per_hour=args.actions_per_hour))
-    jobs_store.ensure_dirs()
+    conn = db.connect()
+    db.init_schema(conn)
     llm = OpenAI()
 
     # Configure the target window once: every input primitive will now verify
@@ -767,16 +801,6 @@ def main():
         print(f"Could not focus a window with title containing {WINDOW!r}.", file=sys.stderr)
         sys.exit(1)
     time.sleep(0.5)
-
-    # Load persisted seen-URLs (alerts already sent)
-    seen_urls_path = Path(args.seen_urls_file)
-    seen_urls: set[str] = set()
-    if seen_urls_path.exists():
-        for line in seen_urls_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                seen_urls.add(line)
-        log(f"Loaded {len(seen_urls)} previously-alerted URL(s) from {seen_urls_path.name}")
 
     if args.reload_first:
         log("Refreshing feed (Ctrl+R)")
@@ -823,7 +847,7 @@ def main():
     saved = 0
     evaluated = 0
     skipped = 0
-    deduped = 0  # judged RELEVANT but URL already in seen_urls.txt
+    deduped = 0  # judged RELEVANT but URL already in DB
     no_progress_iters = 0
     pacing_stop = False
 
@@ -935,16 +959,8 @@ def main():
                     skipped += 1
                     continue
 
-                if not is_relevant:
-                    skipped += 1
-                    log(f"  -> SKIP ({reason})")
-                    act.focus_window(WINDOW)
-                    act.key("escape")
-                    time.sleep(0.5)
-                    continue
-
-                # 4. Relevant — capture URL via Copy-to-clipboard, then close
-                log(f"  -> RELEVANT ({reason}) — capturing URL")
+                # 4. Capture URL (needed regardless of relevance — we record
+                #    every scrape into the DB to build the market-research corpus)
                 url = capture_url_via_clipboard(WINDOW)
                 info.url = url
 
@@ -953,33 +969,38 @@ def main():
                 time.sleep(0.5)
 
                 if not url:
-                    log(f"  WARN: no URL captured. Pressing Esc to recover; continuing.")
-                    act.focus_window(WINDOW)
-                    act.key("escape")
-                    time.sleep(0.5)
-
-                # Dedup: skip alerts/proposals if we've already pinged this URL
-                if url and url in seen_urls:
-                    log(f"  -> ALREADY ALERTED (url in seen_urls.txt) — not re-pinging")
-                    deduped += 1
+                    log(f"  WARN: no URL captured. Skipping DB write for this card.")
+                    if not is_relevant:
+                        skipped += 1
+                        log(f"  -> SKIP ({reason})")
                     continue
 
-                # Cross-status dedup: skip if this job already exists in any
-                # jobs/<status>/ directory (already queued or already applied).
-                if url:
-                    try:
-                        job_id_check = jobs_store.extract_job_id(url)
-                        if jobs_store.is_known_job_id(job_id_check):
-                            log(f"  -> ALREADY IN QUEUE (job_id={job_id_check}) — not re-queuing")
-                            deduped += 1
-                            continue
-                    except ValueError:
-                        pass  # malformed URL — fall through and let later code handle it
+                # Detect known-vs-new BEFORE upsert so dedup decision is correct
+                try:
+                    job_id_check = db.extract_job_id(url)
+                except ValueError:
+                    log(f"  WARN: malformed URL {url!r}, skipping DB write")
+                    continue
+                already_known = db.is_known_job_id(conn, job_id_check)
 
+                # Persist to DB regardless of relevance — this is the corpus.
+                _persist_scan_to_db(conn, info, url)
+
+                if not is_relevant:
+                    skipped += 1
+                    log(f"  -> SKIP ({reason}) [recorded in DB]")
+                    continue
+
+                if already_known:
+                    log(f"  -> RELEVANT but ALREADY KNOWN ({reason}) — no re-alert, no re-proposal")
+                    continue
+
+                # New + relevant: alert and generate proposal
+                log(f"  -> RELEVANT ({reason}) — new job, generating proposal")
                 with open(out_path, "a", encoding="utf-8") as f:
                     f.write(info.to_markdown(reason))
                 saved += 1
-                log(f"  -> SAVED  url={url or 'MISSING'}")
+                log(f"  -> SAVED  url={url}")
 
                 # Generate Doc-version proposal: structured markdown body + short
                 # cover letter that links to the Doc. Two steps:
@@ -1015,26 +1036,20 @@ def main():
                     log(f"  Proposal generation failed: {ex}")
                     p = None
 
-                # Persist this job to jobs/pending/<id>.json BEFORE we notify, so
-                # the apply queue is independent of Discord delivery.
+                # Mark the job as pending in the DB BEFORE we notify, so the
+                # apply queue is independent of Discord delivery.
                 if p is not None and url:
                     try:
-                        job_data = {
-                            "url": url,
-                            "title": info.title,
-                            "found_at": datetime.now().isoformat(timespec="seconds"),
-                            "budget": info.budget,
-                            "client": {"summary": info.client_summary},
-                            "skills": info.tags or [],
-                            "description": info.description,
-                            "doc_url": p.doc_url,
-                            "cover_letter": p.cover_letter,
-                            "why_relevant": reason,
-                        }
-                        queue_path = jobs_store.write_pending(job_data)
-                        log(f"  -> Queued for apply: {queue_path}")
+                        db.mark_apply_pending(
+                            conn,
+                            job_id=db.extract_job_id(url),
+                            doc_url=p.doc_url,
+                            cover_letter=p.cover_letter,
+                            why_relevant=reason,
+                        )
+                        log(f"  -> Queued for apply (apply_status='pending')")
                     except Exception as ex:
-                        log(f"  WARN: failed to queue job for apply: {ex}")
+                        log(f"  WARN: failed to mark apply_pending: {ex}")
 
                 # Send Discord alert + proposal
                 try:
@@ -1052,12 +1067,6 @@ def main():
                         log(f"  -> Discord proposal sent")
                 except Exception as ex:
                     log(f"  Notify failed: {ex}")
-
-                # Persist URL so future cycles dedup correctly
-                if url:
-                    seen_urls.add(url)
-                    with open(seen_urls_path, "a", encoding="utf-8") as f:
-                        f.write(url + "\n")
 
                 # Pacing check
                 s = pacing.get_pacer().stats()
