@@ -14,19 +14,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import sys
 import time
 from pathlib import Path
-
-# UTF-8 console output (only apply when running as a script, not when imported)
-if __name__ == "__main__":
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
 
 import pyperclip
 from dotenv import load_dotenv
@@ -37,6 +28,8 @@ import notify
 import observe
 import pacing
 import upwork_driver as ud  # reuse parse_feed_cards / collect_panel_info / capture_url
+# Note: upwork_driver's module-level UTF-8 stdout wrapper applies once we
+# import it, so we don't need our own.
 
 WINDOW = "Upwork"
 TARGET_WINDOWS = (
