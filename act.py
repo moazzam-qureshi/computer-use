@@ -28,18 +28,26 @@ class FocusLost(RuntimeError):
 # Module-level "what window are we automating right now". Set by
 # set_target_window(); read by require_focus(); used by every input primitive
 # (click/key/type/scroll/navigate) to verify focus before sending input.
-_TARGET_WINDOW: str | None = None
+# Stored as a tuple of acceptable substrings — focus is OK if ANY of them match.
+_TARGET_WINDOWS: tuple[str, ...] = ()
 
 
-def set_target_window(title_substr: str | None) -> None:
-    """Declare the window every input primitive must verify focus against.
+def set_target_window(title_substr) -> None:
+    """Declare the window(s) every input primitive must verify focus against.
 
-    Pass None to clear (input primitives then skip the focus check, falling back
-    to the legacy fire-and-pray behavior). Use this for diagnostic scripts that
-    intentionally type into the foreground regardless of what it is.
+    Accepts either a single string (legacy) or a tuple/list of acceptable
+    substrings — useful when the same workflow visits pages with different
+    titles (e.g. Upwork's feed says 'Upwork' but the apply page says 'Submit a
+    Proposal'). Pass None or an empty tuple to clear (input primitives then
+    skip the focus check, falling back to the legacy fire-and-pray behavior).
     """
-    global _TARGET_WINDOW
-    _TARGET_WINDOW = title_substr
+    global _TARGET_WINDOWS
+    if title_substr is None:
+        _TARGET_WINDOWS = ()
+    elif isinstance(title_substr, str):
+        _TARGET_WINDOWS = (title_substr,)
+    else:
+        _TARGET_WINDOWS = tuple(s for s in title_substr if s)
 
 
 @dataclass
@@ -96,26 +104,42 @@ def focus_window(title_substr: str, timeout: float = 2.0) -> bool:
     return False
 
 
-def require_focus(title_substr: str | None = None, timeout: float = 2.0) -> None:
-    """Try-then-verify: bring `title_substr` (or the configured target window)
-    to the foreground, then verify the foreground window actually matches.
+def require_focus(title_substr=None, timeout: float = 2.0) -> None:
+    """Try-then-verify: bring an acceptable target window to the foreground,
+    then verify the foreground window actually matches one of them.
     Raises FocusLost if it can't be confirmed within `timeout`.
+
+    `title_substr` accepts a string, a tuple of strings, or None (uses the
+    module-level configured targets). If no targets are configured, this is
+    a no-op.
     """
-    target = title_substr if title_substr is not None else _TARGET_WINDOW
-    if target is None:
-        return  # No target configured — skip the check
-    if focus_window(target, timeout=timeout):
-        return
-    # focus_window already retried — give one final verification chance
-    if _foreground_matches(target[:30]):
-        return
+    if title_substr is None:
+        targets = _TARGET_WINDOWS
+    elif isinstance(title_substr, str):
+        targets = (title_substr,)
+    else:
+        targets = tuple(s for s in title_substr if s)
+    if not targets:
+        return  # No targets configured — skip the check
+    # Fast path: foreground already matches one of the acceptable titles
+    for t in targets:
+        if _foreground_matches(t[:30]):
+            return
+    # Try each target in turn
+    for t in targets:
+        if focus_window(t, timeout=timeout):
+            return
+    # Final verification chance after the retry loops
+    for t in targets:
+        if _foreground_matches(t[:30]):
+            return
     try:
         fg = uia.GetForegroundControl()
         fg_name = (fg.Name or "<unknown>") if fg is not None else "<none>"
     except Exception:
         fg_name = "<error>"
     raise FocusLost(
-        f"Cannot confirm {target!r} is foreground after {timeout}s; "
+        f"Cannot confirm any of {targets!r} is foreground after {timeout}s; "
         f"current foreground: {fg_name!r}"
     )
 

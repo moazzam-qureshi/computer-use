@@ -44,17 +44,25 @@ def _role_short(ctrl) -> str:
     return name.replace("Control", "").lower() if name else "unknown"
 
 
-def find_window(title_substr: str | None):
-    """Return foreground window if title_substr is None; else find by title."""
+def find_window(title_substr):
+    """Return foreground window if title_substr is None; else find by title.
+
+    `title_substr` accepts a string or a tuple/list of strings; the first
+    window whose title contains ANY of the substrings is returned.
+    """
     if title_substr is None:
         return uia.GetForegroundControl()
-    needle_l = title_substr.lower()
+    if isinstance(title_substr, str):
+        needles = [title_substr.lower()]
+    else:
+        needles = [s.lower() for s in title_substr if s]
     desktop = uia.GetRootControl()
     win = desktop.GetFirstChildControl()
     while win is not None:
         try:
             if win.ControlTypeName == "WindowControl":
-                if needle_l in (win.Name or "").lower():
+                name_l = (win.Name or "").lower()
+                if any(n in name_l for n in needles):
                     return win
         except Exception:
             pass

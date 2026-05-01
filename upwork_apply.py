@@ -41,6 +41,9 @@ import observe
 import proposal
 
 WINDOW = "Upwork"
+# Apply page renders with browser tab title "Submit a Proposal", which the
+# Chrome window title reflects. Both substrings are acceptable for focus.
+TARGET_WINDOWS = ("Upwork", "Submit a Proposal")
 APPLY_FORM_ANCHOR_TEXT = "cover letter"  # case-insensitive substring match
 
 
@@ -54,7 +57,7 @@ def log(msg: str) -> None:
 
 def navigate_to_apply(apply_url: str) -> None:
     """Focus the Upwork window, then navigate via the address bar."""
-    if not act.focus_window(WINDOW):
+    if not act.focus_window(TARGET_WINDOWS[0]):
         raise RuntimeError(f"Could not focus window matching {WINDOW!r}")
     time.sleep(0.3)
     act.navigate(apply_url)
@@ -67,7 +70,7 @@ def wait_for_apply_form(timeout: float = 10.0, poll_interval: float = 1.0) -> No
     needle = APPLY_FORM_ANCHOR_TEXT.lower()
     while time.time() < deadline:
         try:
-            obs = observe.observe(window_title=WINDOW, include_unnamed=False, include_text=True)
+            obs = observe.observe(window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True)
         except Exception as ex:
             log(f"  observe failed during wait: {ex}")
             time.sleep(poll_interval)
@@ -107,7 +110,7 @@ def find_cover_letter_textarea():
     Heuristic: the largest editable element whose top is below the topmost
     'Cover letter' label. Confirmed by dumping a real apply page.
     """
-    obs = observe.observe(window_title=WINDOW, include_unnamed=True, include_text=True)
+    obs = observe.observe(window_title=TARGET_WINDOWS, include_unnamed=True, include_text=True)
     label_y = _label_y(obs.elements, "cover letter")
     if label_y is None:
         return None
@@ -132,7 +135,7 @@ def paste_cover_letter(cover_letter: str) -> bool:
         log("  Could not find cover-letter textarea")
         return False
     log(f"  Cover-letter textarea: bounds={el.bounds}")
-    act.focus_window(WINDOW)
+    act.focus_window(TARGET_WINDOWS[0])
     act.click(el)
     time.sleep(0.4)
     pyperclip.copy(cover_letter)
@@ -148,16 +151,23 @@ class Question:
     textarea: object  # observe Element
 
 
-def _bid_section_y(elements) -> int | None:
-    """Return the top-y of the bid/Connects section, or None.
-    Anchors: 'Bid', 'Hourly rate', 'Connects', 'Submit a proposal'."""
-    needles = ("bid", "hourly rate", "connects", "submit a proposal")
+def _post_questions_y(elements) -> int | None:
+    """Return the top-y of the first section that comes AFTER screening
+    questions, or None. Anchors are headings that always appear below the
+    questions block on Upwork's apply page: 'Attachments', 'Profile highlights',
+    'Boost your proposal', 'Send for'.
+
+    Note: deliberately does NOT use 'bid' as an anchor because the page also
+    has 'What is the rate you'd like to bid for this job?' ABOVE cover letter
+    on hourly jobs, which would incorrectly pull the boundary too high.
+    """
+    needles = ("attachments", "profile highlights", "boost your proposal", "send for")
     ys = []
     for e in elements:
         if e.role != "text":
             continue
         n = (e.name or "").strip().lower()
-        if any(n.startswith(needle) or needle in n for needle in needles):
+        if any(needle in n for needle in needles):
             ys.append(e.bounds[1])
     return min(ys) if ys else None
 
@@ -165,18 +175,18 @@ def _bid_section_y(elements) -> int | None:
 def detect_screening_questions() -> list[Question]:
     """Return a list of Question(label, textarea) for the apply form.
     Excludes the cover-letter textarea. Returns [] if no questions found."""
-    obs = observe.observe(window_title=WINDOW, include_unnamed=True, include_text=True)
+    obs = observe.observe(window_title=TARGET_WINDOWS, include_unnamed=True, include_text=True)
     cover_letter_el = find_cover_letter_textarea()
     cover_letter_id = cover_letter_el.id if cover_letter_el else None
 
     cover_y = cover_letter_el.bounds[1] if cover_letter_el else 0
-    bid_y = _bid_section_y(obs.elements) or 10**9
+    upper_bound_y = _post_questions_y(obs.elements) or 10**9
 
     edits = [
         e for e in _editable_elements(obs.elements)
         if e.id != cover_letter_id
         and e.bounds[1] > cover_y
-        and e.bounds[1] < bid_y
+        and e.bounds[1] < upper_bound_y
     ]
     if not edits:
         return []
@@ -191,7 +201,18 @@ def detect_screening_questions() -> list[Question]:
             if t.bounds[1] >= textarea.bounds[1]:
                 break
             tn = t.name.strip().lower()
-            if tn in ("cover letter", "bid", "connects", "submit a proposal"):
+            # Skip generic section labels that aren't actual questions
+            if tn in (
+                "cover letter",
+                "attachments",
+                "profile highlights",
+                "boost your proposal",
+                "submit a proposal",
+                "proposal settings",
+                "job details",
+                "terms",
+                "schedule a rate increase",
+            ):
                 continue
             if 5 <= len(t.name.strip()) <= 400:
                 label = t.name.strip()
@@ -229,7 +250,7 @@ def answer_and_paste_questions(questions: list[Question], job: dict, dry_run: bo
         log(f"    A{i}: {answer[:160]!r}")
         if dry_run:
             continue
-        act.focus_window(WINDOW)
+        act.focus_window(TARGET_WINDOWS[0])
         act.click(q.textarea)
         time.sleep(0.4)
         pyperclip.copy(answer)
@@ -266,7 +287,7 @@ def main():
 
     load_dotenv()
     jobs_store.ensure_dirs()
-    act.set_target_window(WINDOW)
+    act.set_target_window(TARGET_WINDOWS)
 
     job_path = pick_next_job(args.job)
     if job_path is None:
