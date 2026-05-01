@@ -26,3 +26,19 @@ def extract_job_id(url: str) -> str:
     if not m:
         raise ValueError(f"No ~<hex> job-id found in URL: {url!r}")
     return m.group(1)
+
+
+_APPLY_URL_RE = re.compile(
+    r"^https://www\.upwork\.com/nx/proposals/job/~[0-9a-f]+/apply/$"
+)
+
+
+def build_apply_url(job_url: str) -> str:
+    """Transform a job URL into the direct apply-page URL."""
+    job_id = extract_job_id(job_url)
+    return f"https://www.upwork.com/nx/proposals/job/~{job_id}/apply/"
+
+
+def is_safe_apply_url(url: str) -> bool:
+    """Strict allowlist match for the apply URL pattern."""
+    return bool(_APPLY_URL_RE.match(url))

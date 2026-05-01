@@ -36,3 +36,35 @@ def test_extract_job_id_with_trailing_query_or_fragment():
 def test_extract_job_id_raises_on_no_match():
     with pytest.raises(ValueError):
         jobs_store.extract_job_id("https://example.com/foo")
+
+
+def test_build_apply_url():
+    job_url = "https://www.upwork.com/jobs/~022050144604938339008"
+    assert (
+        jobs_store.build_apply_url(job_url)
+        == "https://www.upwork.com/nx/proposals/job/~022050144604938339008/apply/"
+    )
+
+
+def test_is_safe_apply_url_accepts_well_formed():
+    assert jobs_store.is_safe_apply_url(
+        "https://www.upwork.com/nx/proposals/job/~01abc/apply/"
+    )
+
+
+def test_is_safe_apply_url_rejects_other_hosts():
+    assert not jobs_store.is_safe_apply_url(
+        "https://evil.com/nx/proposals/job/~01abc/apply/"
+    )
+
+
+def test_is_safe_apply_url_rejects_missing_trailing_slash():
+    assert not jobs_store.is_safe_apply_url(
+        "https://www.upwork.com/nx/proposals/job/~01abc/apply"
+    )
+
+
+def test_is_safe_apply_url_rejects_non_hex_id():
+    assert not jobs_store.is_safe_apply_url(
+        "https://www.upwork.com/nx/proposals/job/~XYZ/apply/"
+    )
