@@ -41,10 +41,13 @@ import proposal
 import vision
 
 WINDOW = "Upwork"
-# Apply page renders with browser tab title "Submit a Proposal", which the
-# Chrome window title reflects. Both substrings are acceptable for focus.
-TARGET_WINDOWS = ("Upwork", "Submit a Proposal")
+# Acceptable Chrome window titles during the apply workflow. The apply page
+# renders with title "Submit a Proposal", but Cloudflare may briefly show
+# "Just a moment..." while challenging the request. All three are valid
+# states we may need to observe / focus during the form-load wait.
+TARGET_WINDOWS = ("Upwork", "Submit a Proposal", "Just a moment")
 APPLY_FORM_ANCHOR_TEXT = "cover letter"  # case-insensitive substring match
+APPLY_FORM_TIMEOUT = 35.0  # generous to absorb Cloudflare challenges (~10-30s)
 
 
 class ApplyFormNotFound(Exception):
@@ -68,22 +71,38 @@ def navigate_to_apply(apply_url: str) -> None:
     act.navigate(apply_url)
 
 
-def wait_for_apply_form(timeout: float = 10.0, poll_interval: float = 1.0) -> None:
+def wait_for_apply_form(timeout: float = APPLY_FORM_TIMEOUT, poll_interval: float = 1.5) -> None:
     """Poll the UIA tree until an element whose text contains 'cover letter'
-    appears. Raise ApplyFormNotFound on timeout."""
+    appears. Tolerates the Chrome window briefly being titled 'Just a moment...'
+    during a Cloudflare challenge — those rounds count as 'still loading'.
+    Raises ApplyFormNotFound on timeout.
+    """
     deadline = time.time() + timeout
     needle = APPLY_FORM_ANCHOR_TEXT.lower()
+    last_state = ""
     while time.time() < deadline:
         try:
             obs = observe.observe(window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True)
         except Exception as ex:
-            log(f"  observe failed during wait: {ex}")
+            # Window not findable — usually means we're between page navigations
+            # or Cloudflare is showing a challenge page with a transient title.
+            # Don't spam; only log on state change.
+            state = "no_window"
+            if state != last_state:
+                log(f"  waiting (no Upwork/Submit/Just-a-moment window yet): {ex}")
+                last_state = state
             time.sleep(poll_interval)
             continue
         for e in obs.elements:
             if needle in (e.name or "").strip().lower():
                 log(f"  Apply form anchor found: role={e.role} name={e.name[:60]!r}")
                 return
+        # Window is found but cover letter isn't present yet (still loading or
+        # Cloudflare challenge in progress).
+        state = "loading"
+        if state != last_state:
+            log(f"  waiting for form to render (window present, Cover Letter not yet)...")
+            last_state = state
         time.sleep(poll_interval)
     raise ApplyFormNotFound(
         f"No element containing {APPLY_FORM_ANCHOR_TEXT!r} appeared within {timeout}s"
@@ -416,8 +435,8 @@ def main():
         log("Navigating to apply page...")
         navigate_to_apply(job["apply_url"])
 
-        log("Waiting for apply form to render (10s timeout)...")
-        wait_for_apply_form(timeout=10.0)
+        log(f"Waiting for apply form to render ({APPLY_FORM_TIMEOUT}s timeout, includes Cloudflare)...")
+        wait_for_apply_form(timeout=APPLY_FORM_TIMEOUT)
 
         if args.dry_run:
             log("--dry-run: skipping cover-letter paste.")
