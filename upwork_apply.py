@@ -56,9 +56,14 @@ def log(msg: str) -> None:
 
 
 def navigate_to_apply(apply_url: str) -> None:
-    """Focus the Upwork window, then navigate via the address bar."""
-    if not act.focus_window(TARGET_WINDOWS[0]):
-        raise RuntimeError(f"Could not focus window matching {WINDOW!r}")
+    """Focus any Upwork-related Chrome window, then navigate via the address bar."""
+    focused = False
+    for title in TARGET_WINDOWS:
+        if act.focus_window(title):
+            focused = True
+            break
+    if not focused:
+        raise RuntimeError(f"Could not focus any window matching {TARGET_WINDOWS!r}")
     time.sleep(0.3)
     act.navigate(apply_url)
 
@@ -135,8 +140,7 @@ def paste_cover_letter(cover_letter: str) -> bool:
         log("  Could not find cover-letter textarea")
         return False
     log(f"  Cover-letter textarea: bounds={el.bounds}")
-    act.focus_window(TARGET_WINDOWS[0])
-    act.click(el)
+    act.click(el)  # require_focus inside act.click handles window focus
     time.sleep(0.4)
     pyperclip.copy(cover_letter)
     time.sleep(0.2)
@@ -264,8 +268,7 @@ def collect_question_labels() -> list[str]:
             log("  hit max_scrolls cap — stopping")
             break
 
-        # Page down to load more content
-        act.focus_window(TARGET_WINDOWS[0])
+        # Page down to load more content (act.scroll's require_focus handles focus)
         act.scroll(1, method="key")  # PageDown
         time.sleep(0.8)  # let the next batch render
 
@@ -277,8 +280,7 @@ def scroll_to_label(label_text: str, max_scrolls: int = 15) -> bool:
     """Bring `label_text` into view by scrolling. First Ctrl+Home to reset,
     then PageDown until the label appears. Returns True on success."""
     needle = label_text.lower()[:80]  # match on a prefix in case of truncation
-    act.focus_window(TARGET_WINDOWS[0])
-    act.key("ctrl+home")
+    act.key("ctrl+home")  # require_focus inside act.key handles window focus
     time.sleep(0.6)
     for i in range(max_scrolls + 1):
         try:
@@ -358,8 +360,7 @@ def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: b
             continue
 
         log(f"    clicking textarea at ({cx}, {cy})")
-        act.focus_window(TARGET_WINDOWS[0])
-        act.click_xy(cx, cy)
+        act.click_xy(cx, cy)  # require_focus inside act.click_xy handles window focus
         time.sleep(0.4)
         pyperclip.copy(answer)
         time.sleep(0.2)
