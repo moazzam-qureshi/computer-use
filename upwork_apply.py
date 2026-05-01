@@ -46,7 +46,11 @@ WINDOW = "Upwork"
 # "Just a moment..." while challenging the request. All three are valid
 # states we may need to observe / focus during the form-load wait.
 TARGET_WINDOWS = ("Upwork", "Submit a Proposal", "Just a moment")
-APPLY_FORM_ANCHOR_TEXT = "cover letter"  # case-insensitive substring match
+# Anchor used to detect "form has finished loading". Must be visible at the
+# top of the apply page on first load (no scrolling required). Cover Letter
+# is virtualized out of UIA when below the fold, so it can't be the wait
+# anchor — we use the H1 instead, which is always at the top.
+APPLY_FORM_ANCHOR_TEXT = "submit a proposal"
 APPLY_FORM_TIMEOUT = 35.0  # generous to absorb Cloudflare challenges (~10-30s)
 
 
@@ -151,21 +155,27 @@ def find_cover_letter_textarea():
     return edits[0]
 
 
-def paste_cover_letter(cover_letter: str) -> bool:
-    """Click the cover-letter textarea, paste cover letter via clipboard.
-    Returns True on success."""
-    el = find_cover_letter_textarea()
-    if el is None:
-        log("  Could not find cover-letter textarea")
-        return False
-    log(f"  Cover-letter textarea: bounds={el.bounds}")
-    act.click(el)  # require_focus inside act.click handles window focus
-    time.sleep(0.4)
-    pyperclip.copy(cover_letter)
-    time.sleep(0.2)
-    act.key("ctrl+v")
-    time.sleep(0.5)
-    return True
+def paste_cover_letter(cover_letter: str, max_scrolls: int = 8) -> bool:
+    """PageDown until the Cover Letter textarea appears in the UIA tree, click
+    it, paste via clipboard. Same pattern as the scanner's
+    capture_url_via_clipboard. Returns True on success.
+    """
+    for attempt in range(max_scrolls + 1):
+        el = find_cover_letter_textarea()
+        if el is not None:
+            log(f"  Cover-letter textarea found after {attempt} pagedown(s): bounds={el.bounds}")
+            act.click(el)
+            time.sleep(0.4)
+            pyperclip.copy(cover_letter)
+            time.sleep(0.2)
+            act.key("ctrl+v")
+            time.sleep(0.5)
+            return True
+        if attempt < max_scrolls:
+            act.scroll(1, method="key")  # PageDown
+            time.sleep(0.5)
+    log(f"  Cover-letter textarea not found after {max_scrolls} pagedowns")
+    return False
 
 
 # ============================================================================
