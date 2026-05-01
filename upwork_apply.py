@@ -34,7 +34,7 @@ import pyperclip
 from dotenv import load_dotenv
 
 import act
-import jobs_store
+import db
 import notify
 import observe
 import proposal
@@ -536,44 +536,44 @@ def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: b
     return answered
 
 
-def pick_next_job(job_id_override: str | None) -> Path | None:
-    """Return the path of the job JSON to apply to, or None."""
+def pick_next_job(conn, job_id_override: str | None) -> dict | None:
+    """Return the pending job dict to apply to, or None."""
     if job_id_override:
-        path = jobs_store.find_pending_by_id(job_id_override)
-        if path is None:
-            log(f"--job {job_id_override}: not found in jobs/pending/")
-        return path
-    return jobs_store.pick_newest_pending_today()
+        job = db.find_pending_by_id(conn, job_id_override)
+        if job is None:
+            log(f"--job {job_id_override}: not found in DB or not in 'pending' status")
+        return job
+    return db.pick_newest_pending_today(conn)
 
 
-def _move_to_failed(path: Path) -> None:
+def _move_to_failed(conn, job_id: str) -> None:
     try:
-        jobs_store.move_to_status(path, "failed")
+        db.set_apply_status(conn, job_id, "failed")
     except Exception as ex:
-        log(f"  WARN: also failed to move JSON to failed/: {ex}")
+        log(f"  WARN: also failed to set apply_status='failed': {ex}")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--job", help="Specific job-id to apply to (overrides date filter)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="Observe form, generate answers, print only — paste nothing, move nothing.")
+                    help="Observe form, generate answers, print only — paste nothing, change no DB state.")
     args = ap.parse_args()
 
     load_dotenv()
-    jobs_store.ensure_dirs()
+    conn = db.connect()
+    db.init_schema(conn)
     act.set_target_window(TARGET_WINDOWS)
 
-    job_path = pick_next_job(args.job)
-    if job_path is None:
+    job = pick_next_job(conn, args.job)
+    if job is None:
         log("No pending jobs from today. Exiting.")
         sys.exit(0)
 
-    job = jobs_store.read_job(job_path)
-    log(f"Picked job: {job['job_id']} — {job['title'][:80]}")
+    log(f"Picked job: {job['job_id']} — {(job.get('title') or '')[:80]}")
     log(f"Apply URL: {job['apply_url']}")
 
-    if not jobs_store.is_safe_apply_url(job["apply_url"]):
+    if not db.is_safe_apply_url(job["apply_url"]):
         log(f"REFUSING to navigate: apply_url failed safety check: {job['apply_url']}")
         sys.exit(2)
 
@@ -609,12 +609,12 @@ def main():
                 log("  Rate increase set to Never.")
 
         if args.dry_run:
-            log("--dry-run: skipping JSON move and Discord notify. Done.")
+            log("--dry-run: skipping DB transition and Discord notify. Done.")
             return
 
-        log("Moving job JSON to awaiting_review/...")
-        new_path = jobs_store.move_to_status(job_path, "awaiting_review")
-        log(f"  Moved to {new_path}")
+        log("Setting apply_status='awaiting_review'...")
+        db.set_apply_status(conn, job["job_id"], "awaiting_review")
+        log("  status updated.")
 
         log("Sending Discord notification...")
         if notify.send_review_needed(
@@ -631,7 +631,7 @@ def main():
         # failure so we can leave the job pending for the next retry.
         log(f"Form wait timed out: {ex}")
         if detect_login_required():
-            log("LOGIN REQUIRED — leaving job in pending/, pinging Discord")
+            log("LOGIN REQUIRED — leaving apply_status='pending', pinging Discord")
             try:
                 notify.send_login_needed(
                     title=job["title"], apply_url=job["apply_url"]
@@ -639,8 +639,8 @@ def main():
             except Exception:
                 pass
             sys.exit(5)
-        log("FAIL (not login-related): moving job to failed/")
-        _move_to_failed(job_path)
+        log("FAIL (not login-related): setting apply_status='failed'")
+        _move_to_failed(conn, job["job_id"])
         try:
             notify.send_review_needed(
                 title=f"FAILED: {job['title']}",
@@ -652,7 +652,7 @@ def main():
         sys.exit(3)
     except Exception as ex:
         log(f"UNHANDLED ERROR: {type(ex).__name__}: {ex}")
-        _move_to_failed(job_path)
+        _move_to_failed(conn, job["job_id"])
         try:
             notify.send_review_needed(
                 title=f"FAILED: {job['title']} ({type(ex).__name__})",
