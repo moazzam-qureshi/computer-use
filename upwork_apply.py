@@ -338,10 +338,8 @@ def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: b
             continue
         log(f"    A{i}: {answer[:160]!r}")
 
-        if dry_run:
-            continue
-
-        # Bring the question into view
+        # Bring the question into view (always — dry-run still validates that
+        # scrolling + vision can locate the textarea)
         if not scroll_to_label(label):
             log(f"    could not scroll to label — skipping")
             continue
@@ -354,6 +352,11 @@ def answer_and_paste_questions(question_labels: list[str], job: dict, dry_run: b
             continue
 
         cx, cy = bb.center
+        if dry_run:
+            log(f"    [dry-run] would click ({cx}, {cy}) — not clicking.")
+            answered += 1
+            continue
+
         log(f"    clicking textarea at ({cx}, {cy})")
         act.focus_window(TARGET_WINDOWS[0])
         act.click_xy(cx, cy)
@@ -407,10 +410,6 @@ def main():
         log(f"REFUSING to navigate: apply_url failed safety check: {job['apply_url']}")
         sys.exit(2)
 
-    if args.dry_run:
-        log("--dry-run: skipping navigation and form interaction.")
-        return
-
     answered = 0
     try:
         log("Navigating to apply page...")
@@ -419,16 +418,23 @@ def main():
         log("Waiting for apply form to render (10s timeout)...")
         wait_for_apply_form(timeout=10.0)
 
-        log("Pasting cover letter...")
-        if not paste_cover_letter(job["cover_letter"]):
-            raise RuntimeError("could not find or click cover-letter textarea")
-        log("Cover letter pasted.")
+        if args.dry_run:
+            log("--dry-run: skipping cover-letter paste.")
+        else:
+            log("Pasting cover letter...")
+            if not paste_cover_letter(job["cover_letter"]):
+                raise RuntimeError("could not find or click cover-letter textarea")
+            log("Cover letter pasted.")
 
         log("Collecting screening question labels (scroll + UIA)...")
         question_labels = collect_question_labels()
         log(f"  Found {len(question_labels)} screening question(s).")
-        answered = answer_and_paste_questions(question_labels, job, dry_run=False)
+        answered = answer_and_paste_questions(question_labels, job, dry_run=args.dry_run)
         log(f"  Answered {answered}/{len(question_labels)} questions.")
+
+        if args.dry_run:
+            log("--dry-run: skipping JSON move and Discord notify. Done.")
+            return
 
         log("Moving job JSON to awaiting_review/...")
         new_path = jobs_store.move_to_status(job_path, "awaiting_review")
