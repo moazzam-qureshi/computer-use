@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -35,6 +37,7 @@ from dotenv import load_dotenv
 import act
 import jobs_store
 import observe
+import proposal
 
 WINDOW = "Upwork"
 APPLY_FORM_ANCHOR_TEXT = "cover letter"  # case-insensitive substring match
@@ -138,6 +141,104 @@ def paste_cover_letter(cover_letter: str) -> bool:
     return True
 
 
+@dataclass
+class Question:
+    label: str
+    textarea: object  # observe Element
+
+
+def _bid_section_y(elements) -> int | None:
+    """Return the top-y of the bid/Connects section, or None.
+    Anchors: 'Bid', 'Hourly rate', 'Connects', 'Submit a proposal'."""
+    needles = ("bid", "hourly rate", "connects", "submit a proposal")
+    ys = []
+    for e in elements:
+        if e.role != "text":
+            continue
+        n = (e.name or "").strip().lower()
+        if any(n.startswith(needle) or needle in n for needle in needles):
+            ys.append(e.bounds[1])
+    return min(ys) if ys else None
+
+
+def detect_screening_questions() -> list[Question]:
+    """Return a list of Question(label, textarea) for the apply form.
+    Excludes the cover-letter textarea. Returns [] if no questions found."""
+    obs = observe.observe(window_title=WINDOW, include_unnamed=True, include_text=True)
+    cover_letter_el = find_cover_letter_textarea()
+    cover_letter_id = cover_letter_el.id if cover_letter_el else None
+
+    cover_y = cover_letter_el.bounds[1] if cover_letter_el else 0
+    bid_y = _bid_section_y(obs.elements) or 10**9
+
+    edits = [
+        e for e in _editable_elements(obs.elements)
+        if e.id != cover_letter_id
+        and e.bounds[1] > cover_y
+        and e.bounds[1] < bid_y
+    ]
+    if not edits:
+        return []
+
+    text_elems = [e for e in obs.elements if e.role == "text" and (e.name or "").strip()]
+    text_elems.sort(key=lambda e: e.bounds[1])
+
+    questions: list[Question] = []
+    for textarea in edits:
+        label = ""
+        for t in text_elems:
+            if t.bounds[1] >= textarea.bounds[1]:
+                break
+            tn = t.name.strip().lower()
+            if tn in ("cover letter", "bid", "connects", "submit a proposal"):
+                continue
+            if 5 <= len(t.name.strip()) <= 400:
+                label = t.name.strip()
+        if label:
+            questions.append(Question(label=label, textarea=textarea))
+    return questions
+
+
+def _load_portfolio_text() -> str:
+    p = Path("portfolio.json")
+    if not p.exists():
+        return "{}"
+    return p.read_text(encoding="utf-8")
+
+
+def answer_and_paste_questions(questions: list[Question], job: dict, dry_run: bool = False) -> int:
+    """Generate an answer for each question and paste it. Returns count answered."""
+    if not questions:
+        log("  No screening questions detected.")
+        return 0
+    portfolio_text = _load_portfolio_text()
+    answered = 0
+    for i, q in enumerate(questions, 1):
+        log(f"  Q{i}: {q.label[:120]}")
+        try:
+            answer = proposal.generate_screening_answer(
+                question=q.label,
+                job_description=job.get("description", ""),
+                cover_letter=job.get("cover_letter", ""),
+                portfolio_json=portfolio_text,
+            )
+        except Exception as ex:
+            log(f"    LLM error: {ex}")
+            continue
+        log(f"    A{i}: {answer[:160]!r}")
+        if dry_run:
+            continue
+        act.focus_window(WINDOW)
+        act.click(q.textarea)
+        time.sleep(0.4)
+        pyperclip.copy(answer)
+        time.sleep(0.2)
+        act.key("ctrl+v")
+        time.sleep(0.4)
+        answered += 1
+    return answered
+
+
 def pick_next_job(job_id_override: str | None) -> Path | None:
     """Return the path of the job JSON to apply to, or None."""
     if job_id_override:
@@ -197,8 +298,13 @@ def main():
         except Exception as mv_ex:
             log(f"  also failed to move JSON to failed/: {mv_ex}")
         sys.exit(4)
-    log("Cover letter pasted.")
-    log("Screening-question handling not yet implemented (next task).")
+    log("Detecting screening questions...")
+    questions = detect_screening_questions()
+    log(f"  Found {len(questions)} screening question(s).")
+    answered = answer_and_paste_questions(questions, job, dry_run=args.dry_run)
+    log(f"  Answered {answered}/{len(questions)} questions.")
+
+    log("Form fill complete. Awaiting-review move + Discord notify next task.")
 
 
 if __name__ == "__main__":
