@@ -43,10 +43,19 @@ import vision
 WINDOW = "Upwork"
 # Acceptable Chrome window titles during the apply workflow. The apply page
 # renders with title "Submit a Proposal", but Cloudflare may briefly show
-# "Just a moment..." while challenging the request, and Ctrl+T momentarily
-# shows "New Tab" before navigation starts. All four are valid transient
-# states we may need to observe / focus during the workflow.
-TARGET_WINDOWS = ("Upwork", "Submit a Proposal", "Just a moment", "New Tab")
+# "Just a moment..." while challenging the request, Ctrl+T momentarily
+# shows "New Tab" before navigation starts, and the user may have any tab
+# active in their Chrome window when we kick off (we Ctrl+T from there).
+# Any title containing 'Google Chrome' is fine — we still defend against
+# wrong-window typing by checking page state (cover letter found, vision
+# question discovery) downstream.
+TARGET_WINDOWS = (
+    "Upwork",
+    "Submit a Proposal",
+    "Just a moment",
+    "New Tab",
+    "Google Chrome",
+)
 # Anchor used to detect "form has finished loading". Must be visible at the
 # top of the apply page on first load (no scrolling required). Cover Letter
 # is virtualized out of UIA when below the fold, so it can't be the wait
@@ -100,23 +109,36 @@ def log(msg: str) -> None:
 
 
 def navigate_to_apply(apply_url: str) -> None:
-    """Focus any Upwork-related Chrome window, open a NEW TAB, then navigate
-    via the address bar. The new tab is left open at the end of the run for
-    the human to review and click Submit.
+    """Focus any Chrome window, open a NEW TAB, then navigate via the address
+    bar. The new tab is left open at the end of the run for the human to
+    review and click Submit.
+
+    We try Upwork-related titles first (so we land in the right Chrome window
+    if the user has multiple), then fall back to any Chrome window.
     """
     focused = False
+    # Try the workflow-specific titles first
     for title in TARGET_WINDOWS:
         if act.focus_window(title):
             focused = True
+            log(f"  focused window: {title!r}")
             break
+    # Fall back to any Chrome window — Ctrl+T works the same regardless of
+    # which page is currently active in the window.
     if not focused:
-        raise RuntimeError(f"Could not focus any window matching {TARGET_WINDOWS!r}")
+        if act.focus_window("Google Chrome"):
+            focused = True
+            log("  focused window: 'Google Chrome' (any tab)")
+    if not focused:
+        raise RuntimeError("Could not focus any Chrome window. Is Chrome running?")
     time.sleep(0.3)
-    # Ctrl+T opens a new tab and focuses the address bar by default
+    # Ctrl+T opens a new tab and focuses the address bar by default.
+    # During this window the title transiently becomes 'New Tab' (covered
+    # by TARGET_WINDOWS) before navigation kicks in.
     act.key("ctrl+t")
     time.sleep(0.6)
     # Belt-and-braces: explicitly focus address bar in case the new tab opened
-    # somewhere unusual (e.g., new-tab page already had focus elsewhere).
+    # somewhere unusual.
     act.key("ctrl+l")
     time.sleep(0.2)
     act.type_text(apply_url)
