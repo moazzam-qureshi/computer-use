@@ -43,9 +43,10 @@ import vision
 WINDOW = "Upwork"
 # Acceptable Chrome window titles during the apply workflow. The apply page
 # renders with title "Submit a Proposal", but Cloudflare may briefly show
-# "Just a moment..." while challenging the request. All three are valid
-# states we may need to observe / focus during the form-load wait.
-TARGET_WINDOWS = ("Upwork", "Submit a Proposal", "Just a moment")
+# "Just a moment..." while challenging the request, and Ctrl+T momentarily
+# shows "New Tab" before navigation starts. All four are valid transient
+# states we may need to observe / focus during the workflow.
+TARGET_WINDOWS = ("Upwork", "Submit a Proposal", "Just a moment", "New Tab")
 # Anchor used to detect "form has finished loading". Must be visible at the
 # top of the apply page on first load (no scrolling required). Cover Letter
 # is virtualized out of UIA when below the fold, so it can't be the wait
@@ -58,12 +59,51 @@ class ApplyFormNotFound(Exception):
     pass
 
 
+class LoginRequired(Exception):
+    """Raised when we detect that the user needs to log in before the apply
+    flow can proceed. Caller should ping the user and leave the job pending."""
+
+
+# Element-name patterns that indicate Upwork is asking for a login.
+# We're conservative — only match strong signals, not random page chrome that
+# might say 'log in' as a link in the footer.
+_LOGIN_SIGNALS = (
+    "log in to upwork",
+    "sign in to upwork",
+    "log in to your account",
+    "continue with email",
+    "continue with google",
+    "continue with apple",
+)
+
+
+def detect_login_required() -> bool:
+    """Return True if the current page looks like a login/sign-in screen.
+    Checks for strong signal elements (login form headings, OAuth buttons)."""
+    try:
+        obs = observe.observe(
+            window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
+        )
+    except Exception:
+        return False
+    for e in obs.elements:
+        name = (e.name or "").strip().lower()
+        if not name:
+            continue
+        if any(sig in name for sig in _LOGIN_SIGNALS):
+            return True
+    return False
+
+
 def log(msg: str) -> None:
     print(f"[apply] {msg}", flush=True)
 
 
 def navigate_to_apply(apply_url: str) -> None:
-    """Focus any Upwork-related Chrome window, then navigate via the address bar."""
+    """Focus any Upwork-related Chrome window, open a NEW TAB, then navigate
+    via the address bar. The new tab is left open at the end of the run for
+    the human to review and click Submit.
+    """
     focused = False
     for title in TARGET_WINDOWS:
         if act.focus_window(title):
@@ -72,7 +112,16 @@ def navigate_to_apply(apply_url: str) -> None:
     if not focused:
         raise RuntimeError(f"Could not focus any window matching {TARGET_WINDOWS!r}")
     time.sleep(0.3)
-    act.navigate(apply_url)
+    # Ctrl+T opens a new tab and focuses the address bar by default
+    act.key("ctrl+t")
+    time.sleep(0.6)
+    # Belt-and-braces: explicitly focus address bar in case the new tab opened
+    # somewhere unusual (e.g., new-tab page already had focus elsewhere).
+    act.key("ctrl+l")
+    time.sleep(0.2)
+    act.type_text(apply_url)
+    time.sleep(0.15)
+    act.key("enter")
 
 
 def wait_for_apply_form(timeout: float = APPLY_FORM_TIMEOUT, poll_interval: float = 1.5) -> None:
@@ -555,7 +604,20 @@ def main():
 
         log("Done. Human: review form in browser, set bid, click Submit.")
     except ApplyFormNotFound as ex:
-        log(f"FAIL: {ex}")
+        # Form didn't render in 35s. Most common cause: Upwork session expired
+        # and the page is asking for login. Distinguish that from a real
+        # failure so we can leave the job pending for the next retry.
+        log(f"Form wait timed out: {ex}")
+        if detect_login_required():
+            log("LOGIN REQUIRED — leaving job in pending/, pinging Discord")
+            try:
+                notify.send_login_needed(
+                    title=job["title"], apply_url=job["apply_url"]
+                )
+            except Exception:
+                pass
+            sys.exit(5)
+        log("FAIL (not login-related): moving job to failed/")
         _move_to_failed(job_path)
         try:
             notify.send_review_needed(

@@ -132,3 +132,15 @@ def send_review_needed(title: str, apply_url: str, questions_answered: int) -> b
         apply_url,
     ]
     return _post("\n".join(lines))
+
+
+def send_login_needed(title: str, apply_url: str) -> bool:
+    """Notify human that Upwork session expired — log in once, then re-run."""
+    lines = [
+        "**Upwork login required — apply flow paused:**",
+        f"Job: **{title}**",
+        f"Open Chrome, log in to Upwork, then re-run the apply driver. "
+        f"This job is still in jobs/pending/ and will be retried.",
+        apply_url,
+    ]
+    return _post("\n".join(lines))
