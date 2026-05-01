@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 STATUSES = ("pending", "awaiting_review", "applied", "skipped", "failed")
@@ -77,3 +78,20 @@ def is_known_job_id(job_id: str, root: Path = DEFAULT_ROOT) -> bool:
         if (root / status / f"{job_id}.json").exists():
             return True
     return False
+
+
+def move_to_status(path: Path, new_status: str, root: Path = DEFAULT_ROOT) -> Path:
+    """Move a job JSON into jobs/<new_status>/, append status_history, return new path."""
+    if new_status not in STATUSES:
+        raise ValueError(f"Unknown status {new_status!r}; must be one of {STATUSES}")
+    data = read_job(path)
+    data.setdefault("status_history", []).append({
+        "status": new_status,
+        "at": datetime.now().isoformat(timespec="seconds"),
+    })
+    job_id = data["job_id"]
+    new_path = root / new_status / f"{job_id}.json"
+    new_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    if path.resolve() != new_path.resolve():
+        path.unlink()
+    return new_path

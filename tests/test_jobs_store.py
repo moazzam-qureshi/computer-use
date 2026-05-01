@@ -114,3 +114,33 @@ def test_is_known_job_id_finds_in_any_status(tmp_path):
     (tmp_path / "applied" / "022050144604938339008.json").write_text("{}")
     assert jobs_store.is_known_job_id("022050144604938339008", root=tmp_path)
     assert not jobs_store.is_known_job_id("999999", root=tmp_path)
+
+
+def test_move_to_status_renames_and_appends_history(tmp_path, monkeypatch):
+    jobs_store.ensure_dirs(tmp_path)
+    src = jobs_store.write_pending(_sample_job_data(), root=tmp_path)
+
+    fixed_now = datetime(2026, 5, 1, 15, 0, 0)
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls):
+            return fixed_now
+
+    monkeypatch.setattr(jobs_store, "datetime", FakeDateTime)
+
+    new_path = jobs_store.move_to_status(src, "awaiting_review", root=tmp_path)
+    assert not src.exists()
+    assert new_path == tmp_path / "awaiting_review" / "022050144604938339008.json"
+    data = json.loads(new_path.read_text(encoding="utf-8"))
+    assert data["status_history"][-1] == {
+        "status": "awaiting_review",
+        "at": "2026-05-01T15:00:00",
+    }
+
+
+def test_move_to_status_rejects_unknown_status(tmp_path):
+    jobs_store.ensure_dirs(tmp_path)
+    src = jobs_store.write_pending(_sample_job_data(), root=tmp_path)
+    with pytest.raises(ValueError):
+        jobs_store.move_to_status(src, "bogus", root=tmp_path)
