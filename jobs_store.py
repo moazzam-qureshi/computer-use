@@ -80,6 +80,38 @@ def is_known_job_id(job_id: str, root: Path = DEFAULT_ROOT) -> bool:
     return False
 
 
+def pick_newest_pending_today(
+    now: datetime | None = None,
+    root: Path = DEFAULT_ROOT,
+) -> Path | None:
+    """Return the pending JSON path with the latest found_at falling on `now`'s
+    local date. Returns None if no pending jobs match today."""
+    now = now or datetime.now()
+    today_date = now.date()
+    pending_dir = root / "pending"
+    if not pending_dir.exists():
+        return None
+    candidates: list[tuple[str, Path]] = []
+    for p in pending_dir.glob("*.json"):
+        try:
+            data = read_job(p)
+            found_at = datetime.fromisoformat(data["found_at"])
+        except Exception:
+            continue
+        if found_at.date() == today_date:
+            candidates.append((data["found_at"], p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return candidates[0][1]
+
+
+def find_pending_by_id(job_id: str, root: Path = DEFAULT_ROOT) -> Path | None:
+    """Return the path to jobs/pending/<id>.json or None if not present."""
+    p = root / "pending" / f"{job_id}.json"
+    return p if p.exists() else None
+
+
 def move_to_status(path: Path, new_status: str, root: Path = DEFAULT_ROOT) -> Path:
     """Move a job JSON into jobs/<new_status>/, append status_history, return new path."""
     if new_status not in STATUSES:

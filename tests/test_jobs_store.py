@@ -144,3 +144,41 @@ def test_move_to_status_rejects_unknown_status(tmp_path):
     src = jobs_store.write_pending(_sample_job_data(), root=tmp_path)
     with pytest.raises(ValueError):
         jobs_store.move_to_status(src, "bogus", root=tmp_path)
+
+
+def _write_pending_with_found_at(tmp_path, job_id, found_at_iso):
+    (tmp_path / "pending" / f"{job_id}.json").write_text(json.dumps({
+        "job_id": job_id,
+        "url": f"https://www.upwork.com/jobs/~{job_id}",
+        "apply_url": f"https://www.upwork.com/nx/proposals/job/~{job_id}/apply/",
+        "title": f"Job {job_id}",
+        "found_at": found_at_iso,
+        "status_history": [{"status": "pending", "at": found_at_iso}],
+    }, indent=2), encoding="utf-8")
+
+
+def test_pick_newest_pending_today_returns_latest(tmp_path):
+    jobs_store.ensure_dirs(tmp_path)
+    today = datetime(2026, 5, 1, 12, 0, 0)
+    _write_pending_with_found_at(tmp_path, "01aaa", "2026-05-01T09:00:00")
+    _write_pending_with_found_at(tmp_path, "01bbb", "2026-05-01T14:00:00")
+    _write_pending_with_found_at(tmp_path, "01ccc", "2026-05-01T11:30:00")
+
+    path = jobs_store.pick_newest_pending_today(now=today, root=tmp_path)
+    assert path is not None
+    assert path.name == "01bbb.json"
+
+
+def test_pick_newest_pending_today_ignores_other_days(tmp_path):
+    jobs_store.ensure_dirs(tmp_path)
+    today = datetime(2026, 5, 1, 12, 0, 0)
+    _write_pending_with_found_at(tmp_path, "01yest", "2026-04-30T22:00:00")
+    _write_pending_with_found_at(tmp_path, "01tom", "2026-05-02T01:00:00")
+
+    assert jobs_store.pick_newest_pending_today(now=today, root=tmp_path) is None
+
+
+def test_pick_newest_pending_today_returns_none_when_empty(tmp_path):
+    jobs_store.ensure_dirs(tmp_path)
+    today = datetime(2026, 5, 1, 12, 0, 0)
+    assert jobs_store.pick_newest_pending_today(now=today, root=tmp_path) is None
