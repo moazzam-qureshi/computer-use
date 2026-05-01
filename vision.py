@@ -50,6 +50,36 @@ def screenshot_png_bytes() -> bytes:
     return buf.getvalue()
 
 
+_LIST_QUESTIONS_PROMPT = """You see a full-screen screenshot of an Upwork "Submit a proposal" page.
+
+Your task: list any client-added screening questions visible on screen.
+
+A screening question is a custom prompt the client added for applicants to
+answer in free text. Each one has:
+  - A short question label (typically ending in '?' or asking for specific
+    info like "show me your work" / "list your experience with X" / "do you
+    have experience with Y")
+  - An empty textarea immediately below it, where the freelancer will type
+    their answer
+
+DO NOT include:
+  - The "Cover Letter" label/textarea (that's the standard cover letter, not a question)
+  - Section headings like "Proposal settings", "Job details", "Terms",
+    "Schedule a rate increase", "Attachments", "Profile highlights",
+    "Boost your proposal"
+  - Bid/rate fields, Connects info, fee breakdowns, dropdowns
+  - Job description text, billing info, pricing fields
+  - Buttons, links, marketing copy
+  - "Add a portfolio project" / "Add a certificate" / similar profile actions
+
+Return ONLY a JSON object of the form:
+  {"questions": ["question text 1", "question text 2", ...]}
+
+If there are NO screening questions visible, return: {"questions": []}
+
+No other text. No markdown fences."""
+
+
 _PROMPT_TEMPLATE = """You see a full-screen screenshot of a web form.
 
 Find the empty textarea that the user should type their answer into for the
@@ -67,6 +97,71 @@ If you cannot find the textarea (question not visible, or textarea is
 off-screen, or you're not confident), return: {{"error": "not found"}}
 
 No other text. No markdown fences. Just the JSON."""
+
+
+def list_visible_questions(
+    *,
+    model: str = "gpt-4o-mini",
+    debug_log=None,
+) -> list[str]:
+    """Take a screenshot, ask the vision model for any client screening
+    questions currently visible. Returns a (possibly empty) list of question
+    label strings."""
+    def _log(msg: str) -> None:
+        if debug_log is not None:
+            debug_log(msg)
+
+    png = screenshot_png_bytes()
+    b64 = base64.b64encode(png).decode("ascii")
+
+    client = OpenAI()
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _LIST_QUESTIONS_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{b64}",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }],
+            temperature=0.0,
+            max_tokens=600,
+        )
+    except Exception as ex:
+        _log(f"  vision API error (list_questions): {ex}")
+        return []
+
+    text = (resp.choices[0].message.content or "").strip()
+    _log(f"  vision (list_questions) raw: {text[:300]!r}")
+
+    # Strip markdown fences if present
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as ex:
+        _log(f"  vision (list_questions) JSON parse failed: {ex}")
+        return []
+
+    qs = data.get("questions")
+    if not isinstance(qs, list):
+        _log(f"  vision (list_questions) unexpected shape: {data}")
+        return []
+
+    out: list[str] = []
+    for q in qs:
+        if isinstance(q, str) and q.strip():
+            out.append(q.strip())
+    return out
 
 
 def find_textarea_for_question(

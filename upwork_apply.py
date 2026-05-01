@@ -190,50 +190,9 @@ def paste_cover_letter(cover_letter: str, max_scrolls: int = 8) -> bool:
 #   3. Click those coordinates, paste the answer via clipboard.
 # ============================================================================
 
-# Section headings / page chrome that should NOT be treated as a question label.
-_NOT_A_QUESTION = frozenset({
-    "additional details",
-    "cover letter",
-    "attachments",
-    "profile highlights",
-    "boost your proposal",
-    "submit a proposal",
-    "proposal settings",
-    "job details",
-    "terms",
-    "schedule a rate increase",
-    "your bid",
-    "summary",
-    "rank",
-    "bid",
-    "now",
-    "1st place",
-    "2nd place",
-    "3rd place",
-    "4th place",
-    "remaining balance",
-})
-
 # Anchor texts that mark the end of the questions region (everything below is
 # bid / connects / submit — we must never click into that area).
 _POST_QUESTION_ANCHORS = ("attachments", "profile highlights", "boost your proposal", "send for")
-
-
-def _is_question_label(text: str) -> bool:
-    """Heuristic: is this text element a screening-question label?"""
-    t = (text or "").strip()
-    if not t:
-        return False
-    if t.lower() in _NOT_A_QUESTION:
-        return False
-    # Reject very short labels (likely UI chrome) and very long blocks (likely
-    # the job description copied into the apply page).
-    if len(t) < 15 or len(t) > 400:
-        return False
-    # Must contain at least one letter (ignore pure-number labels like "$10.00")
-    if not any(c.isalpha() for c in t):
-        return False
-    return True
 
 
 def _seen_post_question_anchor(elements) -> bool:
@@ -248,50 +207,39 @@ def _seen_post_question_anchor(elements) -> bool:
 
 
 def collect_question_labels() -> list[str]:
-    """Scroll down the apply page progressively, collecting unique question
-    labels via UIA. Stops when a 'post-question' anchor (Attachments / Boost
-    your proposal / etc.) appears, or after a hard scroll cap.
+    """Scroll the apply page through the question region, asking the vision
+    model at each scroll position to list any client screening questions
+    visible. Dedup across positions. Stop when post-question anchor (Attachments
+    / Boost your proposal) appears in UIA, or hard scroll cap is hit.
 
-    Caller must have already pasted the cover letter (so the cover letter
-    label is at the top of the form region we're scanning).
+    Caller must have already handled (or skipped) the cover letter.
     """
-    log("Scrolling page to collect question labels...")
-    # Start from a known position: scroll the cover letter into view, then
-    # progressively page down. We DON'T Ctrl+Home here because that may scroll
-    # the entire page chrome to the top; instead we let scroll_to_label handle
-    # positioning later when answering.
-    seen_labels: list[str] = []  # preserve order
+    log("Scrolling page + asking vision for screening questions...")
+    seen_questions: list[str] = []
     seen_set: set[str] = set()
-    max_scrolls = 12  # safety cap
+    max_scrolls = 6
 
     for scroll_num in range(max_scrolls + 1):
+        # Ask vision what questions are visible right now
+        questions_here = vision.list_visible_questions(debug_log=log)
+        for q in questions_here:
+            key = q.strip().lower()
+            if key in seen_set:
+                continue
+            seen_set.add(key)
+            seen_questions.append(q.strip())
+            log(f"  found Q: {q[:100]!r}")
+
+        # Check if we've scrolled past the question region
         try:
             obs = observe.observe(
                 window_title=TARGET_WINDOWS, include_unnamed=False, include_text=True
             )
+            if _seen_post_question_anchor(obs.elements):
+                log("  reached post-question anchor (Attachments/Boost) — stopping scroll")
+                break
         except Exception as ex:
             log(f"  observe failed during scroll {scroll_num}: {ex}")
-            return seen_labels
-
-        # Sort visible text elements by y so the order matches reading order
-        text_elems = [e for e in obs.elements if e.role == "text"]
-        text_elems.sort(key=lambda e: e.bounds[1])
-
-        new_count = 0
-        for e in text_elems:
-            label = (e.name or "").strip()
-            if not _is_question_label(label):
-                continue
-            if label in seen_set:
-                continue
-            seen_set.add(label)
-            seen_labels.append(label)
-            log(f"  found Q label: {label[:100]!r}")
-            new_count += 1
-
-        if _seen_post_question_anchor(obs.elements):
-            log("  reached post-question anchor (Attachments/Boost) — stopping scroll")
-            break
 
         if scroll_num >= max_scrolls:
             log("  hit max_scrolls cap — stopping")
@@ -301,8 +249,8 @@ def collect_question_labels() -> list[str]:
         act.scroll(1, method="key")  # PageDown
         time.sleep(0.8)  # let the next batch render
 
-    log(f"  collected {len(seen_labels)} unique question label(s)")
-    return seen_labels
+    log(f"  collected {len(seen_questions)} unique question(s)")
+    return seen_questions
 
 
 def scroll_to_label(label_text: str, max_scrolls: int = 15) -> bool:
