@@ -266,6 +266,7 @@ def main():
 
     load_dotenv()
     jobs_store.ensure_dirs()
+    act.set_target_window(WINDOW)
 
     job_path = pick_next_job(args.job)
     if job_path is None:
