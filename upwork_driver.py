@@ -782,22 +782,34 @@ def main():
         log("Refreshing feed (Ctrl+R)")
         act.focus_window(WINDOW)
         act.key("ctrl+r")
-        time.sleep(4.0)  # generous wait for full reload
+        time.sleep(6.0)  # generous wait for full reload + React hydration
 
         # After reload, the default tab is "Best Matches". Click "Most Recent".
-        log("Switching to Most Recent tab")
-        act.focus_window(WINDOW)
-        obs = observe.observe(window_title=WINDOW, include_unnamed=False, include_text=False)
-        most_recent = next(
-            (e for e in obs.elements
-             if e.role == "button" and e.name.strip() == "Most Recent"),
-            None,
-        )
-        if most_recent is None:
-            log("WARN: 'Most Recent' tab not found after reload — proceeding on whatever is shown")
-        else:
+        # We click TWICE with a wait between because on slow connections the
+        # first click can land before React has bound its handler — the click
+        # registers in screen space but the tab doesn't switch. The second
+        # click is idempotent (clicking an already-active tab is a no-op).
+        log("Switching to Most Recent tab (click + verify + click)")
+        for attempt in range(1, 4):
+            act.focus_window(WINDOW)
+            obs = observe.observe(window_title=WINDOW, include_unnamed=False, include_text=False)
+            most_recent = next(
+                (e for e in obs.elements
+                 if e.role in ("button", "listitem", "tabitem")
+                 and e.name.strip() == "Most Recent"),
+                None,
+            )
+            if most_recent is None:
+                log(f"  attempt {attempt}: 'Most Recent' element not in tree, waiting 2s")
+                time.sleep(2.0)
+                continue
+            log(f"  attempt {attempt}: clicking (role={most_recent.role}, bounds={most_recent.bounds})")
             act.click(most_recent)
-            time.sleep(2.0)  # let the tab content render
+            time.sleep(2.5)
+            if attempt >= 2:
+                # Two clicks fired — that's enough. Stop.
+                break
+        log("Most Recent tab click sequence done")
 
     # Output file header if new
     out_path = Path(args.output)
