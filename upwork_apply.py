@@ -264,7 +264,14 @@ def collect_question_labels() -> list[str]:
 
 def scroll_to_label(label_text: str, max_scrolls: int = 15) -> bool:
     """Bring `label_text` into view by scrolling. First Ctrl+Home to reset,
-    then PageDown until the label appears. Returns True on success."""
+    then PageDown until the label appears. Returns True as soon as the label
+    is in the UIA tree at any visible position.
+
+    NOTE: we don't try to re-position the label within the viewport here.
+    PageDown jumps ~1000px which can over-scroll and push the label off the
+    top, making the next observe miss it entirely. The label-bounds + offset
+    click works regardless of where in the viewport the label sits.
+    """
     needle = label_text.lower()[:80]  # match on a prefix in case of truncation
     act.key("ctrl+home")  # require_focus inside act.key handles window focus
     time.sleep(0.6)
@@ -281,13 +288,6 @@ def scroll_to_label(label_text: str, max_scrolls: int = 15) -> bool:
                 continue
             name = (e.name or "").strip().lower()
             if needle in name:
-                # Found it. Ideally label is in upper portion of viewport so
-                # the textarea below it is also visible. If label is too low,
-                # scroll one more PageDown.
-                top_y = e.bounds[1]
-                if top_y > 700:  # too low — bring it up
-                    act.scroll(1, method="key")
-                    time.sleep(0.5)
                 return True
         if i < max_scrolls:
             act.scroll(1, method="key")
