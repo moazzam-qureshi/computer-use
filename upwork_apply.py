@@ -29,6 +29,7 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+import pyperclip
 from dotenv import load_dotenv
 
 import act
@@ -75,6 +76,66 @@ def wait_for_apply_form(timeout: float = 10.0, poll_interval: float = 1.0) -> No
     raise ApplyFormNotFound(
         f"No element containing {APPLY_FORM_ANCHOR_TEXT!r} appeared within {timeout}s"
     )
+
+
+def _editable_elements(elements):
+    """Filter UIA elements down to text-input surfaces (Edit/Document roles)."""
+    editable_roles = {"edit", "document"}
+    return [e for e in elements if e.role.lower() in editable_roles]
+
+
+def _label_y(elements, label_substr: str) -> int | None:
+    """Return the top-y of the topmost text element containing `label_substr`
+    (case-insensitive). None if no match."""
+    needle = label_substr.lower()
+    candidates = [
+        e for e in elements
+        if e.role == "text" and needle in (e.name or "").strip().lower()
+    ]
+    if not candidates:
+        return None
+    return min(c.bounds[1] for c in candidates)
+
+
+def find_cover_letter_textarea():
+    """Return the Element representing the cover-letter textarea, or None.
+
+    Heuristic: the largest editable element whose top is below the topmost
+    'Cover letter' label. Confirmed by dumping a real apply page.
+    """
+    obs = observe.observe(window_title=WINDOW, include_unnamed=True, include_text=True)
+    label_y = _label_y(obs.elements, "cover letter")
+    if label_y is None:
+        return None
+    edits = [
+        e for e in _editable_elements(obs.elements)
+        if e.bounds[1] >= label_y
+    ]
+    if not edits:
+        return None
+    edits.sort(
+        key=lambda e: (e.bounds[2] - e.bounds[0]) * (e.bounds[3] - e.bounds[1]),
+        reverse=True,
+    )
+    return edits[0]
+
+
+def paste_cover_letter(cover_letter: str) -> bool:
+    """Click the cover-letter textarea, paste cover letter via clipboard.
+    Returns True on success."""
+    el = find_cover_letter_textarea()
+    if el is None:
+        log("  Could not find cover-letter textarea")
+        return False
+    log(f"  Cover-letter textarea: bounds={el.bounds}")
+    act.focus_window(WINDOW)
+    act.click(el)
+    time.sleep(0.4)
+    pyperclip.copy(cover_letter)
+    time.sleep(0.2)
+    act.key("ctrl+v")
+    time.sleep(0.5)
+    return True
 
 
 def pick_next_job(job_id_override: str | None) -> Path | None:
@@ -128,7 +189,16 @@ def main():
             log(f"  also failed to move JSON to failed/: {mv_ex}")
         sys.exit(3)
 
-    log("Apply form is up. Form-fill not yet implemented (next task).")
+    log("Pasting cover letter...")
+    if not paste_cover_letter(job["cover_letter"]):
+        log("FAIL: could not paste cover letter")
+        try:
+            jobs_store.move_to_status(job_path, "failed")
+        except Exception as mv_ex:
+            log(f"  also failed to move JSON to failed/: {mv_ex}")
+        sys.exit(4)
+    log("Cover letter pasted.")
+    log("Screening-question handling not yet implemented (next task).")
 
 
 if __name__ == "__main__":
