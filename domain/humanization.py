@@ -97,7 +97,7 @@ class Humanizer:
     def sample_greeting_variant(self, client_name: Optional[str]) -> Optional[str]:
         if not client_name:
             return None
-        choices = [f"Hey {client_name},", f"Hi {client_name} —", None]
+        choices = [f"Hey {client_name},", f"Hi {client_name},", None]
         return self.rng.choice(choices)
 
     def sample_cycle_type(self) -> CycleType:
