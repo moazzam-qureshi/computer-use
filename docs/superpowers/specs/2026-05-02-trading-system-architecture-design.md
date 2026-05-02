@@ -474,7 +474,111 @@ Enforced in `domain/setups.py` at the moment of enabling. The Performance Review
 
 Once ≥3 setups have ≥10 orders each, Risk Manager can switch from global caps to per-setup allocation. Until then, equal weighting.
 
-## 9. Engineering principles (non-negotiable)
+## 9. Humanization — appearing human at every layer
+
+A core requirement: the system must be **indistinguishable from an aggressive but human freelancer**. Aggressive ≠ inhuman. Top freelancers apply within minutes, send 10-20 proposals/week, run polished pitches. That's the cover. What gives away automation is not speed — it's **statistical regularity, perfect uptime, and behavioral uniformity.**
+
+### 9.1 What we defend against
+
+The threat model is: Upwork's anti-automation systems (or a human reviewer) sees a pattern and flags the account. We don't know exactly what they instrument, so we defend against everything that's known to leak automation in scraping/automation literature:
+
+| Tell | Defense |
+|---|---|
+| Cron-pattern timing | Human-shaped timing distributions on every interval |
+| 24/7 perfect uptime | Diurnal activity envelope with off-hours decay, occasional off-days |
+| Identical session patterns | Behavioral diversity per cycle (skims, abandons, side-trips to Messages/Profile) |
+| Zero-pause apply form fills | Idle/abandon patterns on apply page (read-pause-type-pause-submit) |
+| Instant paste of cover letter | Typed-cadence cover letter input (variable wpm, occasional backspace) |
+| Identical proposal phrasing | LLM voice diversity (varied openers, signoffs, greeting forms) |
+| Exactly N applies/week | Volume variance — a distribution, not a target |
+| Identical scrape:apply ratio | Mix of scrape-only, panel-open-then-skip, and read-but-don't-act cycles |
+| Same-second submissions | Minimum 30-90s gap between any two order submissions |
+
+**Calibration note:** LLM-flavored proposals are no longer a risk signal. Most active Upwork bidders today paste ChatGPT-drafted proposals — Upwork tolerates this because they have to. So pasting a polished cover letter in one shot is *normal human behavior*, not a tell. We do NOT type out cover letters character-by-character — that would be *more* anomalous than pasting, since no real freelancer types out 300 polished words live. The defense is in the behavioral envelope around the paste (read pauses, review pauses, abandons), not the paste itself.
+
+### 9.2 Where humanization lives in the architecture
+
+`domain/humanization.py` owns the timing distributions and behavioral mix decisions. It's a pure-logic module (no I/O) that exposes:
+
+```
+sample_scan_interval(now, active_hours_envelope) -> seconds
+sample_panel_dwell(job_features) -> seconds          # how long to "read" a panel
+sample_apply_form_pauses(form_complexity) -> [pause_durations]
+sample_review_pause(text_length) -> seconds          # how long to "review" pasted text
+sample_signoff_variant(setup_id) -> ('- Moazzam'|'Cheers, Moazzam'|'Best, Moazzam')
+sample_greeting_variant(client_name) -> ('Hey {name},'|'Hi {name} —'|None)
+should_take_diversion_cycle(now, recent_history) -> bool  # visit Messages instead
+should_abandon_apply(setup_id, current_streak) -> bool   # 5% abandon rate
+```
+
+Every consumer (scheduler, bidder, apply executor, proposal generator) calls `humanization.*` instead of using fixed timings or hard-coded text. The module is unit-testable in isolation: feed it a seed, assert the distribution shape over 10000 samples.
+
+### 9.3 The diurnal envelope (configurable)
+
+```
+default envelope (local time):
+  00:00-07:00  → 5%  activity (insomnia mode, occasional)
+  07:00-09:00  → 60% (morning ramp)
+  09:00-12:00  → 100%
+  12:00-13:30  → 40% (lunch dip)
+  13:30-18:00  → 100%
+  18:00-22:00  → 70% (evening, slightly slower)
+  22:00-00:00  → 30% (winding down)
+  Weekends: multiply by 0.6 with random off-day every 3-5 weeks
+```
+
+"Activity" here means probability that any given scheduled cycle actually executes its full sequence. A 5% activity tick doesn't run the cycle, just logs "skipped (envelope)" and moves on. Critical-tier signals can override the envelope (a human *would* respond to a hot opportunity at 11 PM).
+
+### 9.4 Cycle-type mix
+
+Not every Bidder cycle does the full feed-scan-and-score sequence. Behavioral mix per active cycle:
+
+| Cycle type | Frequency | Behavior |
+|---|---|---|
+| Full scan | 60% | Refresh feed, scan top N, open panels for unseen jobs, score, possibly signal |
+| Skim only | 20% | Refresh feed, look at top N titles, don't open any panels |
+| Panel skim | 10% | Refresh, open 1-2 panels, close without scoring (a human read it, didn't grab them) |
+| Side trip | 5% | Visit Messages tab or My Proposals tab, scroll, return. Doubles as "Viewed" outcome scraping. |
+| Idle / no-op | 5% | Tick logged, nothing done (got distracted, never reached for the laptop) |
+
+Probabilities tunable. The mix is sampled per-cycle, weighted by recent history (don't do 5 side-trips in a row).
+
+### 9.5 Apply-page humanization
+
+When the apply executor opens the apply page:
+1. Idle 8-30s before any action (re-reading the job)
+2. Scroll up and down at least once
+3. Paste cover letter from clipboard (matches real-world behavior — most freelancers paste from ChatGPT)
+4. Post-paste review pause (5-15s) — scroll within the textarea, simulate re-reading
+5. Mid-form pause (5-15s) before screening Q answers ("thinking")
+6. Final review pause (10-20s) before submission
+7. ~5% abandon rate on opened apply pages (close without submitting; the order goes back to `awaiting_approval` and pings Discord "automation simulated abandon, re-approve to retry")
+
+Critical-tier setups can dial pauses down (humans rushing also rush) but never to zero.
+
+### 9.6 Order spacing
+
+The apply executor enforces a minimum 30-90s wall-clock gap between any two order submissions, even if multiple are queued. Implemented in `bidder/apply_executor.py` as a debounce against the `orders` table — last `submitted_at` + sampled gap < `now()` blocks the next submission until the gap elapses.
+
+### 9.7 LLM voice diversity
+
+Proposal generation prompts already enforce strong personal voice (good — varies per job naturally). Add:
+- Greeting variants (sampled per call): `Hey {name},`, `Hi {name} —`, no greeting (open with insight)
+- Signoff variants: `- Moazzam`, `Cheers, Moazzam`, `Best, Moazzam`
+- Cover letter length variants: ±15% target word count
+- Doc title structure variants: outcome-line | question-form | direct-promise
+
+Variants are recorded in the trade journal so the BA can correlate variant choice with funnel performance over time. (This is also free A/B data.)
+
+### 9.8 Honest limits
+
+- We can't fully simulate the *thinking* gaps a real human takes (the literal seconds spent staring at a job before deciding). We can sample plausible distributions but they're imperfect.
+- We can't simulate cursor mouse paths in this stack (UIA clicks go to coordinates, no mid-path movement). This is a known gap; mitigation is that UIA clicks don't expose the mouse-path channel that web automation does, so it's likely not instrumented.
+- Off-hours behavior should be tested in production cautiously — if Upwork instruments timezone-of-account vs activity-clock, we want our envelope to match the user's actual local timezone (configurable, default America/Toronto for this user — confirm).
+
+The humanization layer is **honest about being imperfect** — it raises the bar against fingerprinting from "obvious bot" to "looks like an aggressive human freelancer," not to "literally indistinguishable." Combined with the UIA substrate (which already evades the navigator.webdriver / CDP detection that catches Playwright), this should be sufficient defense for the system's lifetime.
+
+## 10. Engineering principles (non-negotiable)
 
 These are baked into every section of the implementation plan that follows from this spec:
 
@@ -502,7 +606,7 @@ These are baked into every section of the implementation plan that follows from 
 
 12. **One thing per file.** No module that does feed parsing + panel parsing + judgment + URL capture + proposal triggering + Discord pinging + DB writes.
 
-## 10. Phase rollout
+## 11. Phase rollout
 
 Each phase ends in a working, deployed system. No phase ships half-built.
 
@@ -563,7 +667,7 @@ Goal: BA agents propose setups daily, you approve via Discord. System starts lea
 - Per-setup capital allocation
 - Web UI — only if a real need surfaces that Discord cannot serve
 
-## 11. Open items deliberately deferred
+## 12. Open items deliberately deferred
 
 - **Per-setup capital allocation:** waits for ≥3 setups with ≥10 orders each
 - **Upwork inbox scraper for outcomes:** Discord slash commands cover this until volume justifies the UIA work on a different page structure
