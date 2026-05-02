@@ -42,7 +42,7 @@ def refresh_feed(window_title: str) -> None:
     act.key("ctrl+t")
     time.sleep(0.6)
     act.navigate(MOST_RECENT_URL)
-    time.sleep(6.0)
+    time.sleep(20.0)  # generous: feed cards stream in via XHR after the page shell loads
 
 
 def click_most_recent_tab(window_title: str) -> None:

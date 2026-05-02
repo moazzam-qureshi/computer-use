@@ -39,12 +39,12 @@ def run_one_cycle(
     scrape_runs: ScrapeRunStore,
     on_signal,
 ) -> None:
-    cycle_type = humanizer.sample_cycle_type()
+    # Always full-scan. The humanizer's cycle-type mix (skim/no-op/panel-skim)
+    # was an anti-detection nicety; in practice it costs real opportunities
+    # and the operator prefers consistent coverage over behavioral camouflage.
+    cycle_type = CycleType.FULL_SCAN
     run_id = scrape_runs.start(source=f"feed:{cycle_type.value}")
-
-    if cycle_type == CycleType.NO_OP:
-        scrape_runs.finish(run_id, notes="no-op cycle")
-        return
+    print(f"[scan] cycle_type={cycle_type.value} run_id={run_id}", flush=True)
 
     feed.refresh_feed(WINDOW)
     feed.click_most_recent_tab(WINDOW)
@@ -54,14 +54,7 @@ def run_one_cycle(
     act.key("ctrl+home")
     time.sleep(1.0)
 
-    if cycle_type == CycleType.SKIM_ONLY:
-        # Skim cycles: glance at the feed, count visible cards, do nothing else.
-        cards = feed._parse_visible_cards(WINDOW)
-        scrape_runs.update_counts(run_id, jobs_seen=len(cards), jobs_new=0, jobs_signaled=0)
-        scrape_runs.finish(run_id, notes="skim only")
-        return
-
-    max_jobs = 2 if cycle_type == CycleType.PANEL_SKIM else 10
+    max_jobs = 10
     setups = setups_store.list_active()
 
     seen_titles: set[str] = set()
@@ -155,9 +148,6 @@ def run_one_cycle(
                 job = _to_job(job_id, url, parsed)
                 job_store.upsert(job, source="feed", raw_panel={})
                 print(f"[scan]   persisted job: title={job.title[:60]!r} budget={job.budget_kind}/{job.budget_min_usd} skills={len(job.skills)}", flush=True)
-
-                if cycle_type == CycleType.PANEL_SKIM:
-                    continue
 
                 print("[scan]   running setup match + enrichment + relevance", flush=True)
                 result = process_job_through_setups(

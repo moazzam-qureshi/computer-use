@@ -42,14 +42,33 @@ class DiurnalEnvelope:
 
 
 def default_envelope() -> DiurnalEnvelope:
+    """Operator schedule: awake 11am-2am Pakistan = 06:00-21:00 UTC.
+
+    Hungry-freelancer pattern: ~95% active during all waking hours (no
+    'lunch dip' because real founders skip lunch during a hunting push),
+    with a sharp drop into the 9-hour sleep window. Brief overnight blips
+    represent the natural 'I stirred and checked my phone' pattern that
+    keeps the account from looking offline for huge stretches.
+
+    Average activity: ~70%. Loses essentially zero waking-hour opportunities
+    while preserving a clear human-shaped diurnal signal (strong workday
+    peak, light overnight floor) so traffic analysis doesn't see a
+    metronomic bot.
+    """
     return DiurnalEnvelope(by_hour={
-        0: 0.05, 1: 0.05, 2: 0.05, 3: 0.05, 4: 0.05, 5: 0.05, 6: 0.05,
-        7: 0.40, 8: 0.60,
-        9: 1.00, 10: 1.00, 11: 1.00,
-        12: 0.40, 13: 0.40,
-        14: 1.00, 15: 1.00, 16: 1.00, 17: 1.00,
-        18: 0.70, 19: 0.70, 20: 0.70, 21: 0.70,
-        22: 0.30, 23: 0.30,
+        # Sleep window (02:00-11:00 Pakistan = 21:00-06:00 UTC).
+        # Light blips for natural overnight stirs.
+        22: 0.10, 23: 0.10,        # 03:00-04:00 PKT — deepest sleep
+        0: 0.05, 1: 0.05, 2: 0.05, # 05:00-07:00 PKT — deepest sleep
+        3: 0.10, 4: 0.15, 5: 0.25, # 08:00-10:00 PKT — pre-wake stirring
+        # Waking window (11:00-02:00 PKT = 06:00-21:00 UTC).
+        # Hungry freelancer = essentially always-on while awake.
+        6: 0.85,                   # 11:00 PKT — just up
+        7: 0.95, 8: 0.95,          # 12:00-13:00 PKT
+        9: 1.00, 10: 1.00, 11: 1.00,  # 14:00-16:00 PKT — afternoon peak
+        12: 0.95, 13: 0.95,        # 17:00-18:00 PKT — no lunch dip, on the grind
+        14: 1.00, 15: 1.00, 16: 1.00, 17: 1.00,  # 19:00-22:00 PKT — evening peak
+        18: 0.95, 19: 0.95, 20: 0.90, 21: 0.70,  # 23:00-02:00 PKT — winding down
     })
 
 

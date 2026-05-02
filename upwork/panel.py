@@ -107,30 +107,45 @@ def capture_panel(window_title: str, max_scrolls: int = 60) -> tuple[list, objec
                     return e
         return None
 
+    # Always scroll the panel down a few times to surface the description,
+    # budget chips, skills, and client trust signals. The initial observation
+    # captures only the panel header (title + maybe Apply button); the body
+    # content streams in as the page renders, and the UIA tree only exposes
+    # what's currently rendered. Each Down-arrow advances ~40px and gives the
+    # next chunk a chance to render before we observe again.
+    #
+    # Track the Copy-to-clipboard button across all observations: keep the
+    # MOST RECENT bounds we've seen (so the click target is fresh, not stale
+    # from a scroll position that's since moved). Stop scrolling once we've
+    # seen Copy at least once AND done at least 3 scrolls (enough to surface
+    # body content even on short panels).
     copy_btn = _find_copy_button(obs_top.elements)
     if copy_btn is not None:
         print(f"[panel] Copy button visible at top; bounds={copy_btn.bounds}", flush=True)
 
-    # Slow Down-arrow scroll until Copy enters the viewport. Stop the moment
-    # it appears so we never scroll past it. Once the Copy button leaves the
-    # viewport, its bounds become stale and clicking them hits empty space.
-    # We accept that fields below Copy on long panels (extra client trust
-    # signals, etc.) won't be captured; URL capture is the priority.
+    min_scrolls = 4   # always do at least this many to get description + budget
+    scrolls_done = 0
     for i in range(max_scrolls):
-        if copy_btn is not None:
+        if copy_btn is not None and scrolls_done >= min_scrolls:
             break
         act.focus_window(window_title)
         act.key("down")
         time.sleep(0.6)
+        scrolls_done += 1
         obs_more = observe.observe(window_title=window_title, include_unnamed=False, include_text=True)
         for e in obs_more.elements:
             k = (e.role, e.name, e.bounds)
             if k not in seen_keys:
                 merged.append(e)
                 seen_keys.add(k)
-        copy_btn = _find_copy_button(obs_more.elements)
-        if copy_btn is not None:
-            print(f"[panel] Copy button found after {i+1} arrow-down(s); bounds={copy_btn.bounds}", flush=True)
+        # Always update copy_btn with the freshest bounds visible right now;
+        # if the latest observation no longer shows Copy (we scrolled past it)
+        # keep the previous reference rather than nulling.
+        latest_copy = _find_copy_button(obs_more.elements)
+        if latest_copy is not None:
+            if copy_btn is None:
+                print(f"[panel] Copy button found after {i+1} arrow-down(s); bounds={latest_copy.bounds}", flush=True)
+            copy_btn = latest_copy
 
     if copy_btn is None:
         all_copy = [e for e in merged if e.role == "button" and (e.name or "").strip() == "Copy to clipboard"]

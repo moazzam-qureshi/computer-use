@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 @dataclass
 class PacingConfig:
-    max_actions_per_hour: int = 40         # session-level rate limit
+    max_actions_per_hour: int = 500        # session-level rate limit (raised from 40 for active hunting; one full scan ~= 80-150 actions)
     fast_range: tuple[float, float] = (0.05, 0.20)   # 80% of actions
     medium_range: tuple[float, float] = (0.5, 2.0)   # 15% of actions
     long_range: tuple[float, float] = (3.0, 12.0)    # 5% of actions ("looked away")
