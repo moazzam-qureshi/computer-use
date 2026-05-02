@@ -23,8 +23,9 @@ async def run_bot(settings: Settings, db: Database, on_ready):
 
     @bot.event
     async def on_ready():
-        print(f"Bot connected as {bot.user}")
-        await bot.tree.sync()
+        print(f"Bot connected as {bot.user}", flush=True)
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash commands", flush=True)
         await on_ready_callback(bot)
 
     from bot.commands import register_commands
