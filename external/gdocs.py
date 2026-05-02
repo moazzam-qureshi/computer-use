@@ -278,7 +278,7 @@ def create_proposal_doc(title: str, markdown: str, diagram_url: Optional[str] = 
                             ins_err = f"{id_field}: {err or data.get('http_error')}"
                             continue
                     ins_res = r
-                    print(f"[gdocs] INSERT_INLINE_IMAGE ok at index {end_index} (param={id_field})", flush=True)
+                    print(f"[gdocs] INSERT_INLINE_IMAGE ok at index {insert_index} (param={id_field})", flush=True)
                     break
                 except Exception as ex:
                     ins_err = f"{id_field}: {ex}"
@@ -484,3 +484,62 @@ def _get_actual_end_index(composio, user_id: str, doc_id: str) -> Optional[int]:
         return None
     print(f"[gdocs] resolved endIndex={last_end_idx}, will insert at {last_end_idx - 1}", flush=True)
     return max(1, last_end_idx - 1)
+
+
+def _proposal_to_markdown(p) -> str:
+    """Render a ProposalDraft (ai.schemas.ProposalDraft) into the locked Doc
+    structure. The diagram section is left as a trailing heading; the actual
+    image is inserted by create_proposal_doc via diagram_url.
+    """
+    lines: list[str] = []
+    lines.append(f"# {p.title}")
+    lines.append("")
+    lines.append(p.opener)
+    lines.append("")
+    if p.approach:
+        lines.append("## How I'd approach it")
+        for item in p.approach:
+            lines.append(f"- {item}")
+        lines.append("")
+    if p.deliverables:
+        lines.append("## What you'd get")
+        for item in p.deliverables:
+            lines.append(f"- {item}")
+        lines.append("")
+    if p.timeline:
+        lines.append("## Timeline")
+        for item in p.timeline:
+            lines.append(f"- {item}")
+        lines.append("")
+    if p.about_me:
+        lines.append("## A bit about me")
+        lines.append(p.about_me)
+        lines.append("")
+    if p.clarifying_questions:
+        lines.append("## Questions I'd want to clarify")
+        for item in p.clarifying_questions:
+            lines.append(f"- {item}")
+        lines.append("")
+    lines.append("## How the pieces fit together")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def create_doc_with_diagram(proposal, *, mermaid_source: str) -> str:
+    """Thin wrapper: render proposal markdown, build a mermaid.ink image URL,
+    then call create_proposal_doc which uploads the image to Drive and inserts
+    it at end-of-doc. Returns the public Doc URL.
+
+    Raises RuntimeError if create_proposal_doc returns None.
+    """
+    from external import mermaid as _mermaid
+
+    body = _proposal_to_markdown(proposal)
+    diagram_url = _mermaid.diagram_to_url(mermaid_source) if mermaid_source else None
+    if diagram_url and not _mermaid.is_safe_url_size(diagram_url):
+        print(f"[gdocs] diagram URL too large ({len(diagram_url.encode())} bytes), skipping", flush=True)
+        diagram_url = None
+    url = create_proposal_doc(title=proposal.title, markdown=body, diagram_url=diagram_url)
+    if url is None:
+        raise RuntimeError("create_doc_with_diagram returned no URL")
+    return url
