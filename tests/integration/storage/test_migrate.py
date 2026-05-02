@@ -29,6 +29,12 @@ def test_first_apply_creates_schema_and_records_versions(db):
 
 
 def test_idempotent_reapply_does_nothing(db):
+    # Self-contained: drop schema so this test does not depend on test ordering
+    with db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            conn.commit()
+
     apply_migrations(db, MIGRATIONS_DIR)
     apply_migrations(db, MIGRATIONS_DIR)  # second call should be a no-op
     versions = applied_versions(db)
