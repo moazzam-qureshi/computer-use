@@ -20,6 +20,24 @@ from substrate import pacing
 pyautogui.FAILSAFE = True   # fling cursor to top-left to abort
 pyautogui.PAUSE = 0.0
 
+# Reserve the bottom strip of the primary monitor for the Windows taskbar.
+# Any click target whose y is at or below this line is treated as a viewport
+# escape and refused; otherwise the click can land on the Start/Search button
+# or system tray and trigger Windows-shell behavior.
+_TASKBAR_RESERVED_PX = 64
+
+
+def _safe_click_y_max() -> int:
+    try:
+        _, h = pyautogui.size()
+        return max(0, h - _TASKBAR_RESERVED_PX)
+    except Exception:
+        return 1080
+
+
+class ClickOutOfViewport(RuntimeError):
+    """Raised when a click target falls into the OS taskbar / off-screen zone."""
+
 
 class FocusLost(RuntimeError):
     """Raised when the target window cannot be brought to / verified as foreground."""
@@ -154,6 +172,15 @@ def click(element: Element, button: str = "left") -> None:
     pacer = pacing.get_pacer()
     pacer.before_action("click")
     x, y = pacer.jitter_click_target(element.bounds)
+    y_max = _safe_click_y_max()
+    if y > y_max:
+        _trace(f"click REFUSED y={y} > y_max={y_max} bounds={element.bounds}")
+        raise ClickOutOfViewport(
+            f"click target y={y} is below safe viewport (y_max={y_max}); "
+            f"element bounds={element.bounds} likely overlaps Windows taskbar. "
+            f"Scroll the page so this element lifts above the taskbar before clicking."
+        )
+    _trace(f"click name={element.name[:40]!r} bounds={element.bounds} target_xy=({x},{y})")
     move_to(x, y)
     _humanish_pause()
     pyautogui.click(button=button)
@@ -163,6 +190,13 @@ def click(element: Element, button: str = "left") -> None:
 def click_xy(x: int, y: int, button: str = "left") -> None:
     require_focus()
     pacing.get_pacer().before_action("click")
+    y_max = _safe_click_y_max()
+    if y > y_max:
+        _trace(f"click_xy REFUSED y={y} > y_max={y_max}")
+        raise ClickOutOfViewport(
+            f"click_xy target y={y} is below safe viewport (y_max={y_max})"
+        )
+    _trace(f"click_xy ({x},{y})")
     move_to(x, y)
     _humanish_pause()
     pyautogui.click(button=button)
@@ -191,6 +225,7 @@ def key(combo: str) -> None:
     """Press a key combination, e.g. 'ctrl+l', 'enter', 'esc', 'ctrl+shift+t'."""
     require_focus()
     pacing.get_pacer().before_action("key")
+    _trace(f"key {combo!r}")
     parts = [p.strip().lower() for p in combo.split("+")]
     if len(parts) == 1:
         pyautogui.press(parts[0])
@@ -208,6 +243,25 @@ def navigate(url: str) -> None:
     key("enter")
 
 
+def _trace(msg: str) -> None:
+    """Print every input action to stdout AND append to substrate_trace.log.
+    Live console output lets the operator watch what's firing in real time;
+    the file log lets us read the last 30 lines after a crash or anomaly.
+    """
+    try:
+        fg = uia.GetForegroundControl()
+        fg_name = (fg.Name or "<unknown>")[:60] if fg is not None else "<none>"
+    except Exception:
+        fg_name = "<error>"
+    line = f"{time.strftime('%H:%M:%S')}  fg={fg_name!r}  {msg}"
+    print(f"[act] {line}", flush=True)
+    try:
+        with open("substrate_trace.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
 def scroll(amount: int, method: str = "key") -> None:
     """Scroll the focused window/panel.
 
@@ -223,6 +277,7 @@ def scroll(amount: int, method: str = "key") -> None:
     """
     require_focus()
     pacing.get_pacer().before_action("scroll")
+    _trace(f"scroll amount={amount} method={method}")
     if method == "key":
         keyname = "pagedown" if amount > 0 else "pageup"
         for _ in range(abs(amount)):

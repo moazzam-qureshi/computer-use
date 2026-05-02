@@ -11,7 +11,7 @@ class Enrichment(BaseModel):
     red_flags: list[str] = Field(default_factory=list, description="vague-spec, unrealistic-budget, scope-creep, etc.")
     green_flags: list[str] = Field(default_factory=list, description="specific outcome, named tech, etc.")
     project_shape: Optional[Literal["greenfield-build", "fix-existing", "audit", "integration", "ongoing-retainer", "prototype", "mvp", "scale-up"]] = None
-    buyer_sophistication: Optional[Literal["technical-founder", "nontechnical-founder", "agency", "enterprise", "recruiter"]] = None
+    buyer_sophistication: Optional[Literal["technical-founder", "nontechnical-founder", "individual", "agency", "enterprise", "recruiter"]] = None
 
 
 class RelevanceCheck(BaseModel):

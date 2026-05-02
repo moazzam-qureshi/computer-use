@@ -14,8 +14,14 @@ logging.getLogger("discord").setLevel(logging.DEBUG)
 logging.getLogger("discord.http").setLevel(logging.INFO)
 logging.getLogger("discord.gateway").setLevel(logging.DEBUG)
 
+from substrate import act as _act
 from scheduler.config import Settings
 from storage.connection import Database
+
+# Allow input primitives when ANY Chrome window is foreground. This covers
+# the brief moment between Ctrl+T (new tab title is 'New Tab - Google Chrome')
+# and the page finishing navigation to Upwork.
+_act.set_target_window(("Upwork", "Google Chrome"))
 from storage.jobs import JobStore
 from storage.setups import SetupStore, SignalStore
 from storage.orders import OrderStore
