@@ -92,6 +92,8 @@ class OrderStore:
         return [self.get(oid) for oid in ids]
 
     def count_submitted_today(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware; submitted_at is timestamptz")
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         with self._db.connection() as conn:
             with conn.cursor() as cur:
@@ -99,6 +101,8 @@ class OrderStore:
                 return cur.fetchone()[0]
 
     def count_submitted_this_week(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware; submitted_at is timestamptz")
         start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         with self._db.connection() as conn:
             with conn.cursor() as cur:
