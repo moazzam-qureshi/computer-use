@@ -45,17 +45,19 @@ Terms intentionally **not** used (they don't carry weight in this market):
 - "Leverage" — n/a
 - "Slippage" — only metaphorical
 
-## 4. The agent boundary rule
+## 4. The AI boundary rule
 
-> LangChain agents reason about *data*. The deterministic substrate acts on *Upwork*.
-> Agents never touch Chrome. The substrate never makes judgment calls.
+> The AI layer reasons and drafts. The deterministic substrate acts on Upwork.
+> No LLM call has a tool that touches Chrome, fires an order, or mutates live state.
 
 This is the load-bearing rule. It splits the system into two trust regions:
 
 - **Deterministic substrate (high trust):** UIA tree reads, SendInput writes, panel parsing, apply form filling, clipboard capture. Proven reliable over hundreds of cycles. No LLM in the control flow.
-- **AI layer (lower trust, sandboxed):** Single LLM calls for content generation; LangChain agents for analytical work. Agents have read-only tools against the corpus + journal + portfolio, plus write access only to *proposal tables* (not live state).
+- **AI layer (lower trust, sandboxed):** All LLM calls go through LangChain `create_agent`. Tactical calls (enrichment, relevance, proposal Doc, cover letter, screening answers) use `create_agent` with a pydantic `response_format` and no tools — they're structured-output generators. Analytical calls (setup proposer, performance reviewer, conversational Q&A) use `create_agent` with read-only tools against the corpus + journal + portfolio, plus write access only to *proposal tables* (not live state).
 
-An agent's worst-case behavior is "writes a bad proposal to a queue waiting for human approval." It cannot burn Connects, cannot hit Upwork, cannot change a live setup, cannot fire an order.
+An agent's worst-case behavior is "writes a bad proposal to a queue waiting for human approval" or "drafts a bad cover letter that the user can read and reject before approving the order." It cannot burn Connects, cannot hit Upwork, cannot change a live setup, cannot fire an order.
+
+**The agent tool whitelist (Section 5.4) is the only set of tools any LLM call can be given.** Adding a new tool to that whitelist is a deliberate design decision, not something done casually.
 
 ## 5. Architecture
 
@@ -148,23 +150,23 @@ storage/           # Postgres DAL. Implements protocols domain depends on.
   agent_runs.py    # AgentRunStore (audit log for AI calls)
   portfolio.py     # PortfolioStore
 
-ai/                # LLM clients, prompts, agents.
-  client.py        # OpenAI client wrapper, cost tracking, retry
-  prompts/         # versioned prompt strings (proposal, cover_letter, enrichment, ...)
-  enrichment.py    # structured extraction from a job (single LLM call)
-  proposal_gen.py  # proposal Doc + cover letter generation (current proposal.py, cleaned)
-  agents/          # LangChain agents
+ai/                # LangChain everything. One way to call an LLM.
+  schemas.py       # pydantic response models (Enrichment, RelevanceCheck, ProposalDraft, CoverLetter, SetupProposal, ...)
+  prompts/         # versioned prompt strings
+  cost_tracker.py  # LangChain callback that writes every call to agent_runs
+  enrichment.py    # create_agent(model=..., response_format=Enrichment) — single-shot structured
+  relevance.py     # create_agent(model=..., response_format=RelevanceCheck) — tie-break call
+  proposal_gen.py  # create_agent(...) for Doc body + cover letter (structured)
+  agents/          # Multi-step agents (with tools)
     setup_proposer.py
     performance_reviewer.py
     pitch_experiment.py
-    journal_qa.py     # the conversational Q&A agent
-  tools.py         # read-only SQL + portfolio + journal tools for agents
+    journal_qa.py
+  tools.py         # read-only SQL + portfolio + journal tools for the multi-step agents
 
-external/          # Third-party service integrations (not Upwork). One module per service.
+external/          # Third-party service integrations (not Upwork, not LLM). One module per service.
   gdocs.py         # Composio Google Docs + Drive (current gdocs.py, cleaned)
   mermaid.py       # mermaid.ink rendering (current mermaid.py, cleaned)
-  discord_webhook.py # legacy webhook client if still needed; otherwise dropped
-  openai.py        # thin wrapper used by ai/client.py
 
 bidder/            # The 24/7 loop. Wires substrate + upwork + domain + ai.
   scan_cycle.py    # one feed-scan iteration
@@ -200,18 +202,20 @@ Three rules applied throughout:
 
 ### 5.4 The 4-layer AI architecture
 
+**One way to call an LLM: LangChain `create_agent`.** Single-shot structured calls use `create_agent(model=..., response_format=PydanticModel)` with no tools. Multi-step analytical work uses `create_agent(model=..., tools=[...], response_format=...)`. There is no separate OpenAI SDK wrapper, no raw `chat.completions` calls, no Instructor, no manual JSON parsing. Every LLM call goes through the same code path so cost tracking, retry, and audit logging happen in exactly one place (`ai/cost_tracker.py` as a LangChain callback wired into every agent).
+
 | Layer | Where | Model | Pattern | Rough cost |
 |---|---|---|---|---|
-| **Tactical** | Bidder per-job: relevance tie-break | gpt-4o-mini | Single call, structured output | $0.0003/job |
-| **Tactical** | Bidder per-job: proposal Doc | gpt-4o | Single call, prompt-engineered | $0.01/signal |
-| **Tactical** | Bidder per-job: cover letter | gpt-4o | Single call | $0.005/signal |
-| **Tactical** | Bidder per-job: screening Q draft | gpt-4o-mini | Single call per Q | $0.001/Q |
-| **Structured extraction** | Per-job enrichment (one-shot, persisted) | gpt-4o-mini | Schema-constrained JSON | $0.001/job |
-| **Analytical (agents)** | BA: setup proposer | gpt-4o | LangChain agent, multi-step, tool use | $0.10/run |
-| **Analytical (agents)** | BA: performance reviewer | gpt-4o-mini | LangChain agent | $0.05/run |
-| **Analytical (agents)** | BA: pitch experiment proposer (Phase 3) | gpt-4o | LangChain agent | $0.05/run |
-| **Analytical (agents)** | Conversational Q&A | gpt-4o-mini default, gpt-4o on complex | LangChain agent, threaded reply | $0.01-0.10/Q |
-| **Continuous learning (Phase 4+)** | Cover-letter retrieval, journal embeddings | text-embedding-3-small | Background batch | <$1/month |
+| **Tactical** | Bidder per-job: relevance tie-break | gpt-4o-mini | `create_agent(response_format=RelevanceCheck)`, no tools | $0.0003/job |
+| **Tactical** | Bidder per-job: proposal Doc | gpt-4o | `create_agent(response_format=ProposalDraft)`, no tools | $0.01/signal |
+| **Tactical** | Bidder per-job: cover letter | gpt-4o | `create_agent(response_format=CoverLetter)`, no tools | $0.005/signal |
+| **Tactical** | Bidder per-job: screening Q draft | gpt-4o-mini | `create_agent(response_format=ScreeningAnswer)`, no tools | $0.001/Q |
+| **Structured extraction** | Per-job enrichment (one-shot, persisted) | gpt-4o-mini | `create_agent(response_format=Enrichment)`, no tools | $0.001/job |
+| **Analytical (agents)** | BA: setup proposer | gpt-4o | `create_agent(tools=[...], response_format=SetupProposal)` | $0.10/run |
+| **Analytical (agents)** | BA: performance reviewer | gpt-4o-mini | `create_agent(tools=[...], response_format=ReviewReport)` | $0.05/run |
+| **Analytical (agents)** | BA: pitch experiment proposer (Phase 3) | gpt-4o | `create_agent(tools=[...], response_format=PitchProposal)` | $0.05/run |
+| **Analytical (agents)** | Conversational Q&A | gpt-4o-mini default, gpt-4o on complex | `create_agent(tools=[...])`, free-form reply in thread | $0.01-0.10/Q |
+| **Continuous learning (Phase 4+)** | Cover-letter retrieval, journal embeddings | text-embedding-3-small | LangChain embeddings interface | <$1/month |
 
 **Agents share one tool set, defined in `ai/tools.py`:**
 
