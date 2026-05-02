@@ -30,13 +30,17 @@ class CostTracker(BaseCallbackHandler):
 
     def __exit__(self, exc_type, exc, tb) -> None:
         status = "succeeded" if exc is None else "failed"
-        self._store.finish(
-            run_id=self._run_id,
-            status=status,
-            total_tokens=self._total_tokens,
-            total_cost_usd=self._total_cost,
-            output_summary=None,
-        )
+        try:
+            self._store.finish(
+                run_id=self._run_id,
+                status=status,
+                total_tokens=self._total_tokens,
+                total_cost_usd=self._total_cost,
+                output_summary=None,
+            )
+        except Exception:
+            # Never mask the original agent exception with a storage failure.
+            pass
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         usage = getattr(response, "llm_output", None) or {}
