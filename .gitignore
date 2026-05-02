@@ -24,6 +24,7 @@ scan.log
 relevant_jobs.md
 seen_urls.txt
 jobs/
+postgres-data/
 
 # IDE
 .idea/
