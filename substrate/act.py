@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import pyautogui
 import uiautomation as uia
 
-import pacing
+from substrate import pacing
 
 pyautogui.FAILSAFE = True   # fling cursor to top-left to abort
 pyautogui.PAUSE = 0.0

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import uiautomation as uia
 
-from act import Element
+from substrate.act import Element
 
 INTERACTABLE_ROLES = {
     "ButtonControl", "HyperlinkControl", "EditControl", "ComboBoxControl",
