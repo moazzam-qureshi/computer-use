@@ -163,8 +163,15 @@ def require_focus(title_substr=None, timeout: float = 2.0) -> None:
 
 
 def move_to(x: int, y: int) -> None:
-    duration = random.uniform(0.12, 0.28)
-    pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
+    """Jump the cursor instantly to (x, y).
+
+    We used to interpolate with a 120-280ms ease animation for 'humanish'
+    movement, but interpolation moves the cursor through every pixel between
+    the start and target. On the apply page, that path crosses Upwork's Uma
+    AI assistant widget at bottom-right, which expands on hover and steals
+    subsequent clicks. Instant jumps don't trigger hover handlers.
+    """
+    pyautogui.moveTo(x, y)
 
 
 def click(element: Element, button: str = "left") -> None:

@@ -50,6 +50,16 @@ def _with_com(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
+# Shared lock both loops acquire before driving Chrome. The bidder and the
+# apply executor both send keystrokes / clicks / observations to the same
+# Chrome window; if they fire concurrently they fight over focus and corrupt
+# each other's state. Whichever loop acquires the lock runs to completion;
+# the other awaits. Acquired in scheduler.main only -- standalone harnesses
+# (bin/run_one_scan.py, bin/run_apply_executor.py) don't need it because
+# they run a single loop.
+ui_lock: asyncio.Lock = asyncio.Lock()
+
+
 async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanizer):
     await bot.wait_until_ready()
     channel = bot.get_channel(settings.discord_channel_id)
@@ -86,20 +96,21 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
             asyncio.run_coroutine_threadsafe(on_signal(signal, order, job), bot.loop)
 
         try:
-            await asyncio.to_thread(
-                _with_com,
-                run_one_cycle,
-                humanizer=humanizer,
-                setups_store=setups_store,
-                signal_store=signal_store,
-                job_store=job_store,
-                order_store=order_store,
-                enrichment_store=enrichment_store,
-                portfolio=portfolio_store,
-                agent_runs=agent_runs,
-                scrape_runs=scrape_runs,
-                on_signal=sync_on_signal,
-            )
+            async with ui_lock:
+                await asyncio.to_thread(
+                    _with_com,
+                    run_one_cycle,
+                    humanizer=humanizer,
+                    setups_store=setups_store,
+                    signal_store=signal_store,
+                    job_store=job_store,
+                    order_store=order_store,
+                    enrichment_store=enrichment_store,
+                    portfolio=portfolio_store,
+                    agent_runs=agent_runs,
+                    scrape_runs=scrape_runs,
+                    on_signal=sync_on_signal,
+                )
         except Exception as e:
             await channel.send(f"Bidder cycle failed: {e!r}")
 
@@ -120,14 +131,15 @@ async def apply_executor_loop(bot, settings: Settings, db: Database, humanizer: 
         for order in approved:
             job = job_store.get(order.job_id)
             try:
-                await asyncio.to_thread(
-                    _with_com,
-                    execute_approved_order,
-                    order, job.url,
-                    order_store=order_store, connects_ledger=connects,
-                    humanizer=humanizer, bid_amount_usd=order.bid_amount_usd or 100.0,
-                    really_submit=False,
-                )
+                async with ui_lock:
+                    await asyncio.to_thread(
+                        _with_com,
+                        execute_approved_order,
+                        order, job.url,
+                        order_store=order_store, connects_ledger=connects,
+                        humanizer=humanizer, bid_amount_usd=order.bid_amount_usd or 100.0,
+                        really_submit=False,
+                    )
                 await channel.send(f"Order #{order.order_id} staged on apply page. Click Submit manually.")
             except Exception as e:
                 await channel.send(f"Apply executor failed for order #{order.order_id}: {e!r}")

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from substrate import act
 from upwork import apply_form
+from upwork.url_helpers import build_apply_url, is_safe_apply_url
 from storage.orders import OrderStore
 from storage.connects_ledger import ConnectsLedgerStore
 from domain.humanization import Humanizer
@@ -29,9 +30,17 @@ def execute_approved_order(
     if order.status == "submitted":
         raise OrderAlreadySubmitted(f"order {order.order_id}")
 
+    # Always navigate to the direct apply URL, never the job-detail URL.
+    # Legacy upwork_apply.py did this with build_apply_url + is_safe_apply_url
+    # gating navigation; we replicate that behavior verbatim.
+    apply_url = build_apply_url(job_url)
+    if not is_safe_apply_url(apply_url):
+        order_store.update_status(order.order_id, "failed")
+        raise ApplyFormChanged(f"unsafe apply URL after build: {apply_url!r}")
+
     order_store.update_status(order.order_id, "staging")
-    apply_form.navigate_to_apply(window_title="Upwork", job_url=job_url)
-    state = apply_form.wait_for_form_or_login(window_title="Upwork", timeout_s=30)
+    apply_form.navigate_to_apply(window_title="Upwork", job_url=apply_url)
+    state = apply_form.wait_for_form_or_login(window_title="Upwork", timeout_s=35)
     if state == "login_required":
         order_store.update_status(order.order_id, "failed")
         raise LoginExpired(f"navigated to {job_url}")
