@@ -29,7 +29,8 @@ def ensure_test_db():
 
 @pytest.fixture
 def db(ensure_test_db):
-    """Per-test database. Each test runs in a savepoint that's rolled back."""
+    """Per-test Database (own pool). Tests are responsible for their own data cleanup
+    — see fresh_db fixture in test_jobs.py and others for the drop-schema pattern."""
     database = Database(_test_dsn(), min_size=1, max_size=2)
     yield database
     database.close()

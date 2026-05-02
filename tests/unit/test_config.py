@@ -32,3 +32,20 @@ def test_settings_raises_on_missing_required(monkeypatch):
     monkeypatch.setenv("LOCAL_TIMEZONE", "America/Toronto")
     with pytest.raises(MissingEnvError, match="DATABASE_URL"):
         Settings.from_env()
+
+
+def test_settings_parses_optional_int_overrides(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/d")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("COMPOSIO_API_KEY", "comp-test")
+    monkeypatch.setenv("COMPOSIO_USER_ID", "user-test")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+    monkeypatch.setenv("DISCORD_CHANNEL_ID", "12345")
+    monkeypatch.setenv("DISCORD_OWNER_USER_ID", "67890")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/x/y")
+    monkeypatch.setenv("LOCAL_TIMEZONE", "America/Toronto")
+    monkeypatch.setenv("CONNECTS_DAILY_CAP", "7")
+    monkeypatch.setenv("CONNECTS_WEEKLY_CAP", "25")
+    s = Settings.from_env()
+    assert s.connects_daily_cap == 7
+    assert s.connects_weekly_cap == 25
