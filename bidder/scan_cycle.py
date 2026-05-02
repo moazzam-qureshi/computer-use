@@ -112,24 +112,28 @@ def run_one_cycle(
                 act.click(title_el)
                 time.sleep(3.0)
 
-                # 2. Read the panel (multi-observe + page-down + merge).
-                print("[scan]   step 2/4: capture_panel (multi-observe)", flush=True)
+                # 2. Read the panel: arrow-down scroll until Copy button is visible,
+                #    merge elements seen across scrolls. Returns the live Copy element
+                #    so we don't have to re-find it.
+                print("[scan]   step 2/4: capture_panel (arrow-down scan for Copy button)", flush=True)
                 try:
-                    elements = panel.capture_panel(WINDOW)
+                    elements, copy_btn = panel.capture_panel(WINDOW)
                 except Exception as ex:
                     print(f"[scan]   capture_panel failed: {ex!r}", flush=True)
-                    elements = []
+                    elements, copy_btn = [], None
                     act.focus_window(WINDOW)
                     act.key("escape")
                     time.sleep(0.5)
                     continue
 
-                # 3. Capture URL from the open panel.
-                print("[scan]   step 3/4: capture URL via clipboard", flush=True)
-                url = clipboard_url.capture_url_from_open_panel(WINDOW)
+                # 3. Click Copy directly with the element capture_panel handed back.
+                print(f"[scan]   step 3/4: click Copy button (found={copy_btn is not None})", flush=True)
+                if copy_btn is not None:
+                    url = clipboard_url.capture_url_from_button(WINDOW, copy_btn)
+                else:
+                    url = clipboard_url.capture_url_from_open_panel(WINDOW)
                 print(f"[scan]   url={url!r}", flush=True)
 
-                # 4. Close the panel before any LLM/IO work.
                 print("[scan]   step 4/4: close panel (Esc)", flush=True)
                 act.focus_window(WINDOW)
                 act.key("escape")

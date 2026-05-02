@@ -69,13 +69,20 @@ KNOWN_COUNTRIES = {
 }
 
 
-def capture_panel(window_title: str) -> list:
-    """Capture all elements visible across the open panel.
+def capture_panel(window_title: str, max_scrolls: int = 60) -> tuple[list, object]:
+    """Capture all elements across the open panel; return (elements, copy_btn).
 
-    The panel is taller than the viewport. Observe once, then PageDown up to
-    4 times, merging elements seen at each step. Returns deduped element list.
-    Caller is responsible for opening the panel first; this function just
-    reads it.
+    Approach: observe top-of-panel, then walk the panel down ONE Down-arrow
+    press at a time, observing AFTER each press, stopping the moment the
+    Copy-to-clipboard button enters the UIA tree.
+
+    Cadence: ~0.6s between arrow presses so each step is visibly small and
+    controlled. With `max_scrolls=60` that's a hard upper bound of ~36s per
+    panel, but in practice the loop exits the moment Copy appears (usually
+    within 10-20 presses for typical Upwork JDs).
+
+    Returns:
+        (merged_elements, copy_to_clipboard_button_element_or_None)
     """
     from substrate import act, observe
 
@@ -87,23 +94,49 @@ def capture_panel(window_title: str) -> list:
         for e in obs_top.elements
     )
     if not panel_open:
-        return []
+        return [], None
 
     seen_keys = {(e.role, e.name, e.bounds) for e in obs_top.elements}
     merged = list(obs_top.elements)
-    for _ in range(4):
+
+    def _find_copy_button(elements: list):
+        for e in elements:
+            if e.role == "button" and (e.name or "").strip() == "Copy to clipboard":
+                l, t, r, b = e.bounds
+                if l >= 1200 and t >= 200 and r > l and b > t and r <= 5000 and b <= 5000:
+                    return e
+        return None
+
+    copy_btn = _find_copy_button(obs_top.elements)
+    if copy_btn is not None:
+        print(f"[panel] Copy button visible at top; bounds={copy_btn.bounds}", flush=True)
+
+    # Slow Down-arrow scroll until Copy enters the viewport. Stop the moment
+    # it appears so we never scroll past it. Once the Copy button leaves the
+    # viewport, its bounds become stale and clicking them hits empty space.
+    # We accept that fields below Copy on long panels (extra client trust
+    # signals, etc.) won't be captured; URL capture is the priority.
+    for i in range(max_scrolls):
+        if copy_btn is not None:
+            break
         act.focus_window(window_title)
-        act.scroll(1, method="key")  # PageDown — focused panel scrolls
-        time.sleep(0.7)
+        act.key("down")
+        time.sleep(0.6)
         obs_more = observe.observe(window_title=window_title, include_unnamed=False, include_text=True)
         for e in obs_more.elements:
             k = (e.role, e.name, e.bounds)
             if k not in seen_keys:
                 merged.append(e)
                 seen_keys.add(k)
-        if any(e.role == "button" and (e.name or "").strip() == "Copy to clipboard" for e in obs_more.elements):
-            break
-    return merged
+        copy_btn = _find_copy_button(obs_more.elements)
+        if copy_btn is not None:
+            print(f"[panel] Copy button found after {i+1} arrow-down(s); bounds={copy_btn.bounds}", flush=True)
+
+    if copy_btn is None:
+        all_copy = [e for e in merged if e.role == "button" and (e.name or "").strip() == "Copy to clipboard"]
+        print(f"[panel] panel ended without Copy button visible. Copy buttons ever seen: {len(all_copy)}; bounds: {[e.bounds for e in all_copy]}", flush=True)
+
+    return merged, copy_btn
 
 
 def _parse_money(token: str) -> Optional[float]:
