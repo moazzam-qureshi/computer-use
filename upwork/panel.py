@@ -69,22 +69,26 @@ KNOWN_COUNTRIES = {
 }
 
 
-def capture_panel(window_title: str, max_scrolls: int = 60) -> tuple[list, object]:
-    """Capture all elements across the open panel; return (elements, copy_btn).
+def capture_panel(window_title: str, max_scrolls: int = 60) -> tuple[list, str]:
+    """Walk the open panel top-to-bottom, capturing every element along the way.
 
-    Approach: observe top-of-panel, then walk the panel down ONE Down-arrow
-    press at a time, observing AFTER each press, stopping the moment the
-    Copy-to-clipboard button enters the UIA tree.
-
-    Cadence: ~0.6s between arrow presses so each step is visibly small and
-    controlled. With `max_scrolls=60` that's a hard upper bound of ~36s per
-    panel, but in practice the loop exits the moment Copy appears (usually
-    within 10-20 presses for typical Upwork JDs).
+    Behavior:
+      1. Observe the panel top.
+      2. Scroll down one Down-arrow at a time (~40px), observing after each press.
+      3. The MOMENT the Copy-to-clipboard button becomes visible, click it
+         immediately and capture the resulting URL from the clipboard. This
+         eliminates any stale-bounds risk: the button is clicked while its
+         bounds are live in the current observation.
+      4. Continue scrolling after URL capture until we hit panel-bottom
+         (detected when an observation produces zero new elements). This
+         surfaces description / budget chips / skills / client trust signals
+         that may sit BELOW the Copy button on long panels.
 
     Returns:
-        (merged_elements, copy_to_clipboard_button_element_or_None)
+        (merged_elements, captured_url_or_empty_string)
     """
     from substrate import act, observe
+    from upwork import clipboard_url
 
     act.focus_window(window_title)
     obs_top = observe.observe(window_title=window_title, include_unnamed=False, include_text=True)
@@ -94,7 +98,7 @@ def capture_panel(window_title: str, max_scrolls: int = 60) -> tuple[list, objec
         for e in obs_top.elements
     )
     if not panel_open:
-        return [], None
+        return [], ""
 
     seen_keys = {(e.role, e.name, e.bounds) for e in obs_top.elements}
     merged = list(obs_top.elements)
@@ -107,45 +111,83 @@ def capture_panel(window_title: str, max_scrolls: int = 60) -> tuple[list, objec
                     return e
         return None
 
-    # Always scroll the panel down a few times to surface the description,
-    # budget chips, skills, and client trust signals. The initial observation
-    # captures only the panel header (title + maybe Apply button); the body
-    # content streams in as the page renders, and the UIA tree only exposes
-    # what's currently rendered. Each Down-arrow advances ~40px and gives the
-    # next chunk a chance to render before we observe again.
-    #
-    # Track the Copy-to-clipboard button across all observations: keep the
-    # MOST RECENT bounds we've seen (so the click target is fresh, not stale
-    # from a scroll position that's since moved). Stop scrolling once we've
-    # seen Copy at least once AND done at least 3 scrolls (enough to surface
-    # body content even on short panels).
-    copy_btn = _find_copy_button(obs_top.elements)
-    if copy_btn is not None:
-        print(f"[panel] Copy button visible at top; bounds={copy_btn.bounds}", flush=True)
+    captured_url = ""
 
-    min_scrolls = 4   # always do at least this many to get description + budget
-    scrolls_done = 0
+    # If Copy is already visible at the top of the panel, click it immediately.
+    initial_copy = _find_copy_button(obs_top.elements)
+    if initial_copy is not None:
+        print(f"[panel] Copy visible at top; clicking now bounds={initial_copy.bounds}", flush=True)
+        url = clipboard_url.capture_url_from_button(window_title, initial_copy)
+        if url:
+            captured_url = url
+            print(f"[panel] URL captured: {url}", flush=True)
+
+    # Two-phase scroll cadence:
+    #   Phase A (URL not yet captured): slow Down-arrow with 0.6s settle.
+    #     Small steps so we observe Copy the instant it enters the viewport
+    #     and never overshoot before we can click it.
+    #   Phase B (URL already captured): mouse-WHEEL scroll at the panel-body
+    #     coordinate. Why not PageDown: clicking Copy puts keyboard focus on
+    #     the button (and triggers a tooltip), so subsequent PageDown keys
+    #     either no-op or are caught by the tooltip/modal layer, causing the
+    #     loop to detect zero progress and bail out — losing description /
+    #     skills / client-trust elements that live BELOW the Copy button.
+    #     Wheel events scroll whatever is under the cursor regardless of
+    #     keyboard focus, so we explicitly aim them at the Copy button's
+    #     last-known coordinate (which is inside the panel scroll area).
+    import pyautogui  # local import; act.scroll wraps but doesn't accept coords
+    consecutive_no_progress = 0
+    # Snapshot the post-click anchor for wheel scrolling. captured_url path
+    # only enters Phase B once, so we set it here when URL is captured below.
+    wheel_anchor: Optional[tuple[int, int]] = None
+    if captured_url and initial_copy is not None:
+        wheel_anchor = initial_copy.center
     for i in range(max_scrolls):
-        if copy_btn is not None and scrolls_done >= min_scrolls:
-            break
         act.focus_window(window_title)
-        act.key("down")
-        time.sleep(0.6)
-        scrolls_done += 1
+        if not captured_url:
+            act.key("down")
+            time.sleep(0.6)
+        else:
+            # Wheel-scroll at the panel-body anchor. Negative argument scrolls
+            # content downward (page advances). Magnitude tuned so each call
+            # advances roughly one viewport, matching the old PageDown cadence.
+            if wheel_anchor is not None:
+                pyautogui.moveTo(wheel_anchor[0], wheel_anchor[1])
+            pyautogui.scroll(-600)
+            time.sleep(0.35)
         obs_more = observe.observe(window_title=window_title, include_unnamed=False, include_text=True)
+        new_count = 0
         for e in obs_more.elements:
             k = (e.role, e.name, e.bounds)
             if k not in seen_keys:
                 merged.append(e)
                 seen_keys.add(k)
-        # Always update copy_btn with the freshest bounds visible right now;
-        # if the latest observation no longer shows Copy (we scrolled past it)
-        # keep the previous reference rather than nulling.
-        latest_copy = _find_copy_button(obs_more.elements)
-        if latest_copy is not None:
-            if copy_btn is None:
-                print(f"[panel] Copy button found after {i+1} arrow-down(s); bounds={latest_copy.bounds}", flush=True)
-            copy_btn = latest_copy
+                new_count += 1
+
+        # Click Copy the instant it's in the live observation. Bounds are
+        # guaranteed fresh because we observed them in this same iteration.
+        if not captured_url:
+            copy_now = _find_copy_button(obs_more.elements)
+            if copy_now is not None:
+                print(f"[panel] Copy found mid-scroll after {i+1} down(s); clicking now bounds={copy_now.bounds}", flush=True)
+                url = clipboard_url.capture_url_from_button(window_title, copy_now)
+                if url:
+                    captured_url = url
+                    # Anchor wheel-scroll at the just-clicked button. Cursor
+                    # is already there from click_xy, but we re-snapshot the
+                    # coordinate so subsequent moveTo calls are explicit.
+                    wheel_anchor = copy_now.center
+                    print(f"[panel] URL captured: {url}; wheel_anchor={wheel_anchor}", flush=True)
+
+        if new_count == 0:
+            consecutive_no_progress += 1
+            if consecutive_no_progress >= 2:
+                print(f"[panel] reached end of panel after {i+1} press(es); merged {len(merged)} elements; url={'YES' if captured_url else 'NO'}", flush=True)
+                break
+        else:
+            consecutive_no_progress = 0
+
+    return merged, captured_url
 
     if copy_btn is None:
         all_copy = [e for e in merged if e.role == "button" and (e.name or "").strip() == "Copy to clipboard"]
@@ -249,6 +291,7 @@ def parse_panel(elements: Iterable) -> PanelData:
     hours_per_week: Optional[str] = None
 
     money_singletons: List[tuple] = []  # (idx, value-string)
+    budget_diag: List[str] = []  # diagnostic trail
 
     def _add_bit(s: str) -> None:
         s = s.strip()
@@ -269,10 +312,12 @@ def parse_panel(elements: Iterable) -> PanelData:
 
         if nl == "fixed-price" or nl.startswith("fixed-price"):
             budget_kind = "fixed"
+            budget_diag.append(f"FIXED@{i} <- {n!r}")
             _add_bit("Fixed-price")
             continue
         if nl == "hourly" or nl.startswith("hourly:") or nl.startswith("hourly "):
             budget_kind = "hourly"
+            budget_diag.append(f"HOURLY@{i} <- {n!r}")
             _add_bit(n if nl != "hourly" else "Hourly")
             continue
         if nl in ("expert", "intermediate", "entry level"):
@@ -291,8 +336,12 @@ def parse_panel(elements: Iterable) -> PanelData:
             _add_bit(n)
             continue
         if _JOB_MONEY_RE.match(n):
+            budget_diag.append(f"MONEY@{i} <- {n!r}")
             money_singletons.append((i, n))
             continue
+
+    if budget_diag:
+        print(f"[panel.parse] budget extraction trail: {budget_diag} -> kind={budget_kind!r}", flush=True)
 
     # Resolve money tokens.
     money_values: List[float] = []

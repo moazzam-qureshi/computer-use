@@ -73,19 +73,24 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
     agent_runs = AgentRunStore(db)
     scrape_runs = ScrapeRunStore(db)
 
+    first_cycle = True
+
     while True:
         now = datetime.now(timezone.utc)
-        if not humanizer.is_active_now(now):
+        # First cycle always fires immediately on process start so the operator
+        # gets fast feedback. Subsequent cycles roll the diurnal envelope.
+        if not first_cycle and not humanizer.is_active_now(now):
             interval = humanizer.sample_scan_interval(active=False)
             await asyncio.sleep(interval)
             continue
+        first_cycle = False
 
         async def on_signal(signal, order, job):
             setup = setups_store.get(signal.primary_setup_id)
             embed = build_signal_embed(
                 setup_name=setup.name, tier=setup.tier, title=job.title,
                 budget_text=f"{job.budget_kind} ${job.budget_min_usd or 0:.0f}",
-                posted_text="recent", client_summary=job.client_country or "?",
+                posted_text=job.posted_text or "recent", client_summary=job.client_country or "?",
                 why_matched=", ".join([m["matched_rules"][0] if m.get("matched_rules") else "" for m in signal.matched_setups]),
                 cover_letter_preview=order.cover_letter_body or "",
             )
@@ -112,7 +117,16 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
                     on_signal=sync_on_signal,
                 )
         except Exception as e:
-            await channel.send(f"Bidder cycle failed: {e!r}")
+            # Distinguish login from other failures so the message is actionable.
+            from scheduler.failure_pings import LoginExpired
+            owner_mention = f"<@{settings.discord_owner_user_id}> " if settings.discord_owner_user_id else ""
+            if isinstance(e, LoginExpired):
+                await channel.send(
+                    f"{owner_mention}Upwork login required. Open the Chrome tab and sign in. "
+                    f"The bidder will resume on the next cycle."
+                )
+            else:
+                await channel.send(f"Bidder cycle failed: {e!r}")
 
         interval = humanizer.sample_scan_interval(active=True)
         await asyncio.sleep(interval)

@@ -44,6 +44,12 @@ def score_job_against_setup(job: Job, setup: Setup) -> MatchResult:
     matched_rules: list[str] = []
     unmet_rules: list[str] = []
 
+    # Empty filter spec = LLM-only setup. The rule layer is optional; setups
+    # may rely entirely on the relevance LLM (signal_pipeline runs the LLM
+    # for every active setup regardless of rule outcome).
+    if not spec:
+        return MatchResult(matched=True, matched_rules=[], unmet_rules=[])
+
     if "all_of" in spec:
         all_ok = True
         for rule in spec["all_of"]:

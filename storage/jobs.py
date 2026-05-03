@@ -24,12 +24,14 @@ class JobStore:
                       budget_kind, budget_min_usd, budget_max_usd,
                       source, client_country, client_payment_verified,
                       client_rating, client_hires, client_total_spent_usd,
+                      posted_text,
                       proposals_count_at_first_scrape, raw_panel_json
                     ) VALUES (
                       %s, %s, %s, %s,
                       %s, %s, %s,
                       %s, %s, %s,
                       %s, %s, %s,
+                      %s,
                       %s, %s
                     )
                     ON CONFLICT (job_id) DO UPDATE SET
@@ -39,12 +41,20 @@ class JobStore:
                       budget_kind = COALESCE(EXCLUDED.budget_kind, jobs.budget_kind),
                       budget_min_usd = COALESCE(EXCLUDED.budget_min_usd, jobs.budget_min_usd),
                       budget_max_usd = COALESCE(EXCLUDED.budget_max_usd, jobs.budget_max_usd),
+                      client_country = COALESCE(EXCLUDED.client_country, jobs.client_country),
+                      client_payment_verified = COALESCE(EXCLUDED.client_payment_verified, jobs.client_payment_verified),
+                      client_rating = COALESCE(EXCLUDED.client_rating, jobs.client_rating),
+                      client_hires = COALESCE(EXCLUDED.client_hires, jobs.client_hires),
+                      client_total_spent_usd = COALESCE(EXCLUDED.client_total_spent_usd, jobs.client_total_spent_usd),
+                      posted_text = COALESCE(EXCLUDED.posted_text, jobs.posted_text),
+                      proposals_count_at_first_scrape = COALESCE(EXCLUDED.proposals_count_at_first_scrape, jobs.proposals_count_at_first_scrape),
                       raw_panel_json = EXCLUDED.raw_panel_json
                 """, (
                     job.job_id, job.url, job.title, job.description,
                     job.budget_kind, job.budget_min_usd, job.budget_max_usd,
                     source, job.client_country, job.client_payment_verified,
                     job.client_rating, job.client_hires, job.client_total_spent_usd,
+                    job.posted_text,
                     job.proposals_count_at_first_scrape, Json(raw_panel),
                 ))
                 # Upsert skills
@@ -67,7 +77,7 @@ class JobStore:
                            budget_kind, budget_min_usd, budget_max_usd,
                            client_country, client_payment_verified,
                            client_rating, client_hires, client_total_spent_usd,
-                           posted_at, proposals_count_at_first_scrape
+                           posted_at, posted_text, proposals_count_at_first_scrape
                     FROM jobs WHERE job_id = %s
                 """, (job_id,))
                 row = cur.fetchone()
@@ -86,7 +96,7 @@ class JobStore:
             client_rating=float(row[9]) if row[9] is not None else None,
             client_hires=row[10],
             client_total_spent_usd=float(row[11]) if row[11] is not None else None,
-            posted_at=row[12], proposals_count_at_first_scrape=row[13],
+            posted_at=row[12], posted_text=row[13], proposals_count_at_first_scrape=row[14],
             skills=skills,
         )
 

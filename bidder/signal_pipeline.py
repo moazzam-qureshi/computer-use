@@ -33,14 +33,22 @@ def process_job_through_setups(
         enrichment = enrich_job(job, agent_run_store=agent_run_store)
         enrichment_store.upsert(job.job_id, enrichment)
 
-    # 2. Score against each active setup
+    # 2. Score against each active setup. The rule layer is a CHEAP pre-filter
+    #    only; the LLM relevance check is the actual gate that decides whether
+    #    to fire a signal. We run the LLM for every active setup regardless of
+    #    whether rules matched, because:
+    #      - skill-name matching by string is too brittle (Upwork's skill chips
+    #        differ slightly from canonical names; new buzzwords appear weekly)
+    #      - the LLM sees the full job context (description, budget, client trust,
+    #        skills) and can apply nuanced judgment that no DSL can encode
+    #      - this lets us scale: setups become prose-driven strategies, not
+    #        rule trees that need constant tuning
     matches: list[tuple[Setup, MatchResult]] = []
     for setup in setups:
         result = score_job_against_setup(job, setup)
-        if result.matched:
-            relevance = check_relevance(job, setup, agent_run_store=agent_run_store)
-            if relevance.relevant:
-                matches.append((setup, result))
+        relevance = check_relevance(job, setup, agent_run_store=agent_run_store)
+        if relevance.relevant:
+            matches.append((setup, result))
 
     if not matches:
         return None

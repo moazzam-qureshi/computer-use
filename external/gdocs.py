@@ -488,17 +488,18 @@ def _get_actual_end_index(composio, user_id: str, doc_id: str) -> Optional[int]:
 
 def _proposal_to_markdown(p) -> str:
     """Render a ProposalDraft (ai.schemas.ProposalDraft) into the locked Doc
-    structure. The diagram section is left as a trailing heading; the actual
-    image is inserted by create_proposal_doc via diagram_url.
+    structure (verbatim from legacy proposal.generate_doc_proposal). The
+    diagram heading is at the end; the image is inserted by create_proposal_doc
+    via the diagram_url argument.
     """
     lines: list[str] = []
     lines.append(f"# {p.title}")
     lines.append("")
     lines.append(p.opener)
     lines.append("")
-    if p.approach:
+    if p.approach_phases:
         lines.append("## How I'd approach it")
-        for item in p.approach:
+        for item in p.approach_phases:
             lines.append(f"- {item}")
         lines.append("")
     if p.deliverables:
@@ -515,20 +516,28 @@ def _proposal_to_markdown(p) -> str:
         lines.append("## A bit about me")
         lines.append(p.about_me)
         lines.append("")
-    if p.clarifying_questions:
+    if p.questions:
         lines.append("## Questions I'd want to clarify")
-        for item in p.clarifying_questions:
+        for item in p.questions:
             lines.append(f"- {item}")
         lines.append("")
-    lines.append("## How the pieces fit together")
-    lines.append("")
+    # Only emit the diagram heading when we actually have a diagram source.
+    # Otherwise we'd render a section header followed by nothing (or worse,
+    # a generic placeholder graph that hurts more than it helps).
+    if (getattr(p, "mermaid_diagram", "") or "").strip():
+        lines.append("## How the pieces fit together")
+        lines.append("")
     return "\n".join(lines)
 
 
-def create_doc_with_diagram(proposal, *, mermaid_source: str) -> str:
-    """Thin wrapper: render proposal markdown, build a mermaid.ink image URL,
-    then call create_proposal_doc which uploads the image to Drive and inserts
-    it at end-of-doc. Returns the public Doc URL.
+def create_doc_with_diagram(proposal, *, mermaid_source: str, job_title: str = "") -> str:
+    """Render proposal markdown + mermaid PNG; create the Doc; return public URL.
+
+    Mirrors legacy upwork_driver behavior:
+      Doc filename: 'Proposal for {job_title[:120]}' (so Drive search finds it
+        by job, not by the LLM's invented outcome line)
+      Body: the rendered ProposalDraft markdown
+      Image: mermaid.ink PNG, inserted at end-of-doc by create_proposal_doc
 
     Raises RuntimeError if create_proposal_doc returns None.
     """
@@ -539,7 +548,8 @@ def create_doc_with_diagram(proposal, *, mermaid_source: str) -> str:
     if diagram_url and not _mermaid.is_safe_url_size(diagram_url):
         print(f"[gdocs] diagram URL too large ({len(diagram_url.encode())} bytes), skipping", flush=True)
         diagram_url = None
-    url = create_proposal_doc(title=proposal.title, markdown=body, diagram_url=diagram_url)
+    title = (f"Proposal for {job_title[:120]}" if job_title else proposal.title) or "Upwork Proposal"
+    url = create_proposal_doc(title=title, markdown=body, diagram_url=diagram_url)
     if url is None:
-        raise RuntimeError("create_doc_with_diagram returned no URL")
+        raise RuntimeError("create_proposal_doc returned no URL")
     return url

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import time
 
-from substrate import act
+from substrate import act, observe
 from upwork import feed, panel, clipboard_url
+from upwork.apply_form import detect_login_required
 from storage.jobs import JobStore
 from storage.setups import SetupStore, SignalStore
 from storage.orders import OrderStore
@@ -21,6 +22,8 @@ from storage.scrape_runs import ScrapeRunStore
 from domain.humanization import Humanizer, CycleType
 from bidder.signal_pipeline import process_job_through_setups
 from bidder.draft_pipeline import draft_order
+from scheduler.failure_pings import LoginExpired
+from ai.panel_extract import extract_panel
 
 
 WINDOW = "Upwork"
@@ -48,6 +51,14 @@ def run_one_cycle(
 
     feed.refresh_feed(WINDOW)
     feed.click_most_recent_tab(WINDOW)
+
+    # If Upwork is asking us to log in, bail this cycle cleanly so the
+    # bidder_loop's outer try/except can ping Discord. The user re-authenticates
+    # in the open Chrome tab; the next cycle picks up where we left off.
+    if detect_login_required():
+        print("[scan] LOGIN REQUIRED detected; aborting cycle", flush=True)
+        scrape_runs.finish(run_id, notes="login_required")
+        raise LoginExpired("Upwork session expired; need to log in via Chrome")
 
     # Scroll to top so the scan is deterministic.
     act.focus_window(WINDOW)
@@ -105,29 +116,31 @@ def run_one_cycle(
                 act.click(title_el)
                 time.sleep(3.0)
 
-                # 2. Read the panel: arrow-down scroll until Copy button is visible,
-                #    merge elements seen across scrolls. Returns the live Copy element
-                #    so we don't have to re-find it.
-                print("[scan]   step 2/4: capture_panel (arrow-down scan for Copy button)", flush=True)
+                # 2. Read the panel: arrow-down scroll all the way to panel-end,
+                #    clicking Copy the moment it surfaces. URL capture happens
+                #    inside capture_panel while bounds are live. We continue
+                #    scrolling after URL capture to surface description / budget
+                #    chips / skills / client trust signals below the Copy button.
+                print("[scan]   step 2/3: capture_panel (full panel walk)", flush=True)
                 try:
-                    elements, copy_btn = panel.capture_panel(WINDOW)
+                    elements, url = panel.capture_panel(WINDOW)
                 except Exception as ex:
                     print(f"[scan]   capture_panel failed: {ex!r}", flush=True)
-                    elements, copy_btn = [], None
+                    elements, url = [], ""
                     act.focus_window(WINDOW)
                     act.key("escape")
                     time.sleep(0.5)
                     continue
 
-                # 3. Click Copy directly with the element capture_panel handed back.
-                print(f"[scan]   step 3/4: click Copy button (found={copy_btn is not None})", flush=True)
-                if copy_btn is not None:
-                    url = clipboard_url.capture_url_from_button(WINDOW, copy_btn)
-                else:
-                    url = clipboard_url.capture_url_from_open_panel(WINDOW)
+                # If capture_panel didn't surface Copy at all (very short or
+                # unusually-laid-out panels), fall back to the legacy entry
+                # point that does its own scroll-and-find.
+                if not url:
+                    print("[scan]   capture_panel returned no URL; falling back to legacy capture_url_from_open_panel", flush=True)
+                    url = clipboard_url.capture_url_from_open_panel(WINDOW) or ""
                 print(f"[scan]   url={url!r}", flush=True)
 
-                print("[scan]   step 4/4: close panel (Esc)", flush=True)
+                print("[scan]   step 3/3: close panel (Esc)", flush=True)
                 act.focus_window(WINDOW)
                 act.key("escape")
                 time.sleep(0.5)
@@ -142,12 +155,15 @@ def run_one_cycle(
                     continue
                 new += 1
 
-                parsed = panel.parse_panel(elements)
+                # LLM-based extraction: feeds the raw element-name dump to a
+                # gpt-4o-mini call that returns a structured PanelExtraction.
+                # No regex maintenance per Upwork layout change.
+                extracted = extract_panel(elements, job_id=job_id, agent_run_store=agent_runs)
                 if title:
-                    parsed.title = title
-                job = _to_job(job_id, url, parsed)
+                    extracted.title = title
+                job = _to_job(job_id, url, extracted)
                 job_store.upsert(job, source="feed", raw_panel={})
-                print(f"[scan]   persisted job: title={job.title[:60]!r} budget={job.budget_kind}/{job.budget_min_usd} skills={len(job.skills)}", flush=True)
+                print(f"[scan]   persisted job: title={job.title[:60]!r} budget={job.budget_kind}/{job.budget_min_usd}-{job.budget_max_usd} skills={len(job.skills)} posted={job.posted_text!r}", flush=True)
 
                 print("[scan]   running setup match + enrichment + relevance", flush=True)
                 result = process_job_through_setups(
@@ -199,21 +215,23 @@ def _job_id_from_url(url: str) -> str:
     return m.group(1) if m else url
 
 
-def _to_job(job_id: str, url: str, parsed) -> "Job":
+def _to_job(job_id: str, url: str, extracted) -> "Job":
+    """Map a PanelExtraction (or PanelData, for backwards-compat) onto a Job."""
     from domain.types import Job
     return Job(
         job_id=job_id,
         url=url,
-        title=parsed.title,
-        description=parsed.description,
-        budget_kind=parsed.budget_kind,
-        budget_min_usd=parsed.budget_min_usd,
-        budget_max_usd=parsed.budget_max_usd,
-        skills=parsed.skills,
-        client_country=parsed.client_country,
-        client_payment_verified=parsed.client_payment_verified,
-        client_rating=parsed.client_rating,
-        client_hires=parsed.client_hires,
-        client_total_spent_usd=parsed.client_total_spent_usd,
-        proposals_count_at_first_scrape=parsed.proposals_count,
+        title=extracted.title or "",
+        description=extracted.description,
+        budget_kind=extracted.budget_kind,
+        budget_min_usd=extracted.budget_min_usd,
+        budget_max_usd=extracted.budget_max_usd,
+        skills=extracted.skills or [],
+        client_country=extracted.client_country,
+        client_payment_verified=extracted.client_payment_verified,
+        client_rating=extracted.client_rating,
+        client_hires=extracted.client_hires,
+        client_total_spent_usd=extracted.client_total_spent_usd,
+        posted_text=extracted.posted_text,
+        proposals_count_at_first_scrape=extracted.proposals_count,
     )

@@ -19,9 +19,11 @@ def draft_order(
 ) -> Order:
     portfolio_items = portfolio.list_matching_tags(job.skills or [])
     proposal = generate_proposal(job, portfolio_items, agent_run_store=agent_run_store)
-    doc_url = gdocs.create_doc_with_diagram(proposal, mermaid_source=proposal.mermaid_diagram)
+    doc_url = gdocs.create_doc_with_diagram(
+        proposal, mermaid_source=proposal.mermaid_diagram, job_title=job.title or "",
+    )
     cover_letter = generate_cover_letter(job, detected_client_name=None, agent_run_store=agent_run_store)
-    body = cover_letter.body.replace("{{doc_url}}", doc_url)
+    body = cover_letter.body.replace("{{doc_url}}", doc_url or "(doc creation failed)")
     order_store.set_drafted(
         order_id=order.order_id,
         cover_letter_body=body,

@@ -44,6 +44,7 @@ class Job:
     client_hires: Optional[int] = None
     client_total_spent_usd: Optional[float] = None
     posted_at: Optional[datetime] = None
+    posted_text: Optional[str] = None  # human-readable, e.g. '17 minutes ago' (Upwork-rendered)
     proposals_count_at_first_scrape: Optional[int] = None
 
 
