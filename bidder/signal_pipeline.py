@@ -43,12 +43,12 @@ def process_job_through_setups(
     #        skills) and can apply nuanced judgment that no DSL can encode
     #      - this lets us scale: setups become prose-driven strategies, not
     #        rule trees that need constant tuning
-    matches: list[tuple[Setup, MatchResult]] = []
+    matches: list[tuple[Setup, MatchResult, list[str]]] = []
     for setup in setups:
         result = score_job_against_setup(job, setup)
         relevance = check_relevance(job, setup, agent_run_store=agent_run_store)
         if relevance.relevant:
-            matches.append((setup, result))
+            matches.append((setup, result, relevance.application_flags or []))
 
     if not matches:
         return None
@@ -59,8 +59,13 @@ def process_job_through_setups(
     primary_setup = matches[0][0]
 
     matched_setups_payload = [
-        {"setup_id": s.setup_id, "match_reason": "rule+llm", "matched_rules": r.matched_rules}
-        for s, r in matches
+        {
+            "setup_id": s.setup_id,
+            "match_reason": "rule+llm",
+            "matched_rules": r.matched_rules,
+            "application_flags": flags,
+        }
+        for s, r, flags in matches
     ]
 
     # 4. Write Signal

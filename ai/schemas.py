@@ -48,6 +48,17 @@ class RelevanceCheck(BaseModel):
     relevant: bool = Field(description="Is this job actually a fit for the setup, beyond the surface rule match?")
     score: float = Field(ge=0.0, le=1.0, description="Confidence 0..1")
     reasoning: str = Field(description="One or two sentences explaining the call")
+    application_flags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-blocking application-format requirements the operator should know about "
+            "when reviewing the proposal in Discord. These do NOT cause rejection (the "
+            "post is otherwise relevant), but require manual attention. Examples: "
+            "'portfolio bundle requested', 'NDA required before kickoff', "
+            "'4 specific screening questions to answer', 'must answer in Spanish', "
+            "'specific timezone overlap (PST)'. If none, return an empty list."
+        ),
+    )
 
 
 class ProposalDraft(BaseModel):

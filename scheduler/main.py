@@ -87,12 +87,21 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
 
         async def on_signal(signal, order, job):
             setup = setups_store.get(signal.primary_setup_id)
+            # Pull flags from the primary setup's match payload. Older signals
+            # written before the application_flags wiring landed will return
+            # an empty list cleanly via .get() defaulting.
+            primary_match = next(
+                (m for m in signal.matched_setups if m.get("setup_id") == signal.primary_setup_id),
+                signal.matched_setups[0] if signal.matched_setups else {},
+            )
+            application_flags = primary_match.get("application_flags") or []
             embed = build_signal_embed(
                 setup_name=setup.name, tier=setup.tier, title=job.title,
                 budget_text=f"{job.budget_kind} ${job.budget_min_usd or 0:.0f}",
                 posted_text=job.posted_text or "recent", client_summary=job.client_country or "?",
                 why_matched=", ".join([m["matched_rules"][0] if m.get("matched_rules") else "" for m in signal.matched_setups]),
                 cover_letter_preview=order.cover_letter_body or "",
+                application_flags=application_flags,
             )
             view = OrderApprovalView(order_id=order.order_id, doc_url=order.doc_url or "")
             await channel.send(embed=embed, view=view)

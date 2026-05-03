@@ -16,7 +16,7 @@ def check_relevance(
     *,
     agent_run_store: AgentRunStore,
     parent_run_id: int | None = None,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-5-mini",
 ) -> RelevanceCheck:
     user = RELEVANCE_USER.format(
         setup_name=setup.name,

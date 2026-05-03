@@ -189,16 +189,71 @@ def generate_cover_letter(
     *,
     agent_run_store: AgentRunStore,
     parent_run_id: Optional[int] = None,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-5-mini",
+    system_prompt_override: Optional[str] = None,
 ) -> CoverLetter:
-    """Locked-formula cover letter; doc_url placeholder substituted by caller."""
-    greeting = f"Hey {detected_client_name}," if detected_client_name else "Hey,"
-    body = (
-        f"{greeting} I spent some time going over your job description.\n"
-        f"Here's how I would approach it: {{{{doc_url}}}}\n"
-        f"Reply with a good time and we can hop on a 20-minute call.\n"
-        f"- Moazzam"
+    """Per-job operator-voice cover letter via gpt-4o-mini.
+
+    The system prompt locks the structure (hook, insight, questions, soft
+    pivot, doc line, soft close, sign-off) and bans the AI-tells (em-dashes,
+    corporate vocabulary, filler greetings, self-claims). The LLM fills the
+    structure with a fresh insight + questions tailored to THIS job.
+
+    The {{doc_url}} placeholder is preserved in the returned body and the
+    caller (bidder.draft_pipeline.draft_order) substitutes the real URL after
+    the Doc has been created.
+    """
+    user = COVER_LETTER_USER.format(
+        title=job.title or "(no title)",
+        budget_text=_budget_text(job),
+        skills=", ".join(job.skills or []) or "(none listed)",
+        description=(job.description or "(no description)")[:4000],
+        client_name=detected_client_name or "(none, use 'Hey,')",
     )
+
+    client = OpenAI()
+    with CostTracker(
+        agent_run_store,
+        agent_name="cover_letter_gen",
+        trigger="per_job",
+        trigger_context={"job_id": job.job_id},
+        parent_run_id=parent_run_id,
+    ):
+        # gpt-5-* reasoning models reject `temperature` and use
+        # `max_completion_tokens`. gpt-4* models use `max_tokens` and accept
+        # `temperature`. Branch on the model name so swapping models doesn't
+        # require touching scheduler-level code.
+        is_reasoning = model.startswith("gpt-5") or model.startswith("o1") or model.startswith("o3")
+        if is_reasoning:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt_override or COVER_LETTER_SYSTEM},
+                    {"role": "user", "content": user},
+                ],
+                max_completion_tokens=4000,
+            )
+        else:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt_override or COVER_LETTER_SYSTEM},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.3,
+                max_tokens=600,
+            )
+
+    body = (resp.choices[0].message.content or "").strip()
+    body = _strip_em_dashes(body)
+
+    # Defense in depth: if the LLM dropped the {{doc_url}} placeholder, the
+    # downstream caller's str.replace() turns into a no-op and we ship a
+    # cover letter without the doc link, which is the entire point of the
+    # message. Append a doc line at the end if missing rather than fail.
+    if "{{doc_url}}" not in body:
+        body = body.rstrip() + "\n\nWrote up the full approach here if you want a look: {{doc_url}}\n\n- Moazzam"
+
     return CoverLetter(body=body)
 
 

@@ -20,7 +20,8 @@ class OrderApprovalView(View):
 
 def build_signal_embed(*, setup_name: str, tier: str, title: str, budget_text: str,
                        posted_text: str, client_summary: str, why_matched: str,
-                       cover_letter_preview: str) -> discord.Embed:
+                       cover_letter_preview: str,
+                       application_flags: list[str] | None = None) -> discord.Embed:
     embed = discord.Embed(
         title=f"Signal: '{setup_name}' (tier: {tier})",
         description=title,
@@ -30,5 +31,15 @@ def build_signal_embed(*, setup_name: str, tier: str, title: str, budget_text: s
     embed.add_field(name="Posted", value=posted_text, inline=True)
     embed.add_field(name="Client", value=client_summary, inline=False)
     embed.add_field(name="Why matched", value=why_matched, inline=False)
+    if application_flags:
+        # Heads-up flags for the operator: things the post requires that the
+        # automated bidder can't fulfill cleanly (portfolio bundle, screening
+        # questions, NDA, specific timezone, etc.). Hard skips (Loom, paid
+        # trial, etc.) are rejected upstream and never reach this code path.
+        embed.add_field(
+            name="⚠ Manual attention needed",
+            value="\n".join(f"• {f}" for f in application_flags)[:1000],
+            inline=False,
+        )
     embed.add_field(name="Cover letter preview", value=cover_letter_preview[:1000], inline=False)
     return embed
