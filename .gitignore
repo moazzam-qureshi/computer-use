@@ -30,3 +30,6 @@ postgres-data/
 .idea/
 .vscode/
 substrate_trace.log
+
+# PM2 + service logs
+logs/

@@ -4,8 +4,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import sys
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+
+# Force UTF-8 on stdout/stderr. PM2 on Windows captures the child process's
+# stdout with the default cp1252 codec, so any print() containing non-ASCII
+# characters (em-dashes, smart quotes, accented characters in scraped Upwork
+# job descriptions) crashes with UnicodeEncodeError. The error gets caught
+# by scan_cycle's outer try/except and the job is silently skipped, which
+# is what was happening when "scan ran but no Discord notifications" --
+# every job whose panel had a smart-quote or em-dash never made it past
+# the print, never reached upsert/relevance/draft.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+except Exception:
+    pass
 
 load_dotenv()
 
@@ -30,6 +45,7 @@ from storage.portfolio import PortfolioStore
 from storage.agent_runs import AgentRunStore
 from storage.scrape_runs import ScrapeRunStore
 from storage.connects_ledger import ConnectsLedgerStore
+from storage.bidder_state import BidderStateStore
 from domain.humanization import Humanizer, default_envelope
 from bidder.scan_cycle import run_one_cycle
 from bidder.apply_executor import execute_approved_order
@@ -72,18 +88,30 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
     portfolio_store = PortfolioStore(db)
     agent_runs = AgentRunStore(db)
     scrape_runs = ScrapeRunStore(db)
+    bidder_state = BidderStateStore(db)
 
     first_cycle = True
 
     while True:
         now = datetime.now(timezone.utc)
-        # First cycle always fires immediately on process start so the operator
-        # gets fast feedback. Subsequent cycles roll the diurnal envelope.
-        if not first_cycle and not humanizer.is_active_now(now):
+
+        # 1. Pause check. Discord /bidder pause sets the flag; we sleep on
+        #    a short interval and re-check. /bidder run-now still fires while
+        #    paused (override path) so the operator can force a cycle.
+        state = bidder_state.get()
+        force_run = bidder_state.consume_force_run()
+        if state.paused and not force_run:
+            await asyncio.sleep(20)
+            continue
+
+        # 2. Diurnal envelope. First cycle always fires immediately for fast
+        #    feedback after a (re)start. Force-run also bypasses the envelope.
+        if not first_cycle and not force_run and not humanizer.is_active_now(now):
             interval = humanizer.sample_scan_interval(active=False)
             await asyncio.sleep(interval)
             continue
         first_cycle = False
+        bidder_state.record_cycle_start()
 
         async def on_signal(signal, order, job):
             setup = setups_store.get(signal.primary_setup_id)
@@ -125,16 +153,19 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
                     scrape_runs=scrape_runs,
                     on_signal=sync_on_signal,
                 )
+            bidder_state.record_cycle_finish("succeeded")
         except Exception as e:
             # Distinguish login from other failures so the message is actionable.
             from scheduler.failure_pings import LoginExpired
             owner_mention = f"<@{settings.discord_owner_user_id}> " if settings.discord_owner_user_id else ""
             if isinstance(e, LoginExpired):
+                bidder_state.record_cycle_finish("login_required", "Upwork session expired")
                 await channel.send(
                     f"{owner_mention}Upwork login required. Open the Chrome tab and sign in. "
                     f"The bidder will resume on the next cycle."
                 )
             else:
+                bidder_state.record_cycle_finish("failed", repr(e)[:500])
                 await channel.send(f"Bidder cycle failed: {e!r}")
 
         interval = humanizer.sample_scan_interval(active=True)
