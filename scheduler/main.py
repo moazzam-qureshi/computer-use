@@ -8,6 +8,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from dotenv import load_dotenv
+import discord
 
 # Force UTF-8 on stdout/stderr. PM2 on Windows captures the child process's
 # stdout with the default cp1252 codec, so any print() containing non-ASCII
@@ -272,6 +273,21 @@ async def main():
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
             print(f"Synced {len(synced)} slash commands to guild '{guild.name}' ({guild.id})", flush=True)
+
+    @bot.event
+    async def on_message(message):
+        # Ignore self.
+        if message.author == bot.user:
+            return
+        # DM only.
+        if not isinstance(message.channel, discord.DMChannel):
+            return
+        # Only the configured operator.
+        if int(message.author.id) != settings.discord_owner_user_id:
+            return
+        print(f"[assistant] DM from {message.author} ({message.author.id}): {message.content!r}", flush=True)
+        from assistant.dm_handler import handle
+        await handle(message, db=db)
 
     async def setup_hook():
         print("setup_hook fired; starting bidder + apply_executor loops", flush=True)
