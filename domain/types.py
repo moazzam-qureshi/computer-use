@@ -60,6 +60,8 @@ class Setup:
     cover_letter_template_id: Optional[int]
     auto_apply_enabled: bool
     escalation_config: dict
+    ignored_clients: list[str] = field(default_factory=list)
+    tone_override: Optional[str] = None
 
 
 @dataclass

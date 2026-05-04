@@ -19,8 +19,9 @@ class SetupStore:
                     INSERT INTO setups (
                       name, status, tier, filter_dsl, prose_definition,
                       pitch_template_id, cover_letter_template_id,
-                      auto_apply_enabled, escalation_config, activated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      auto_apply_enabled, escalation_config,
+                      ignored_clients, tone_override, activated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                               CASE WHEN %s = 'active' THEN now() ELSE NULL END)
                     RETURNING setup_id
                 """, (
@@ -28,6 +29,7 @@ class SetupStore:
                     Json(setup.filter_dsl.spec), setup.prose_definition,
                     setup.pitch_template_id, setup.cover_letter_template_id,
                     setup.auto_apply_enabled, Json(setup.escalation_config),
+                    setup.ignored_clients, setup.tone_override,
                     setup.status,
                 ))
                 return cur.fetchone()[0]
@@ -38,7 +40,8 @@ class SetupStore:
                 cur.execute("""
                     SELECT setup_id, name, status, tier, filter_dsl, prose_definition,
                            pitch_template_id, cover_letter_template_id,
-                           auto_apply_enabled, escalation_config
+                           auto_apply_enabled, escalation_config,
+                           ignored_clients, tone_override
                     FROM setups WHERE setup_id = %s
                 """, (setup_id,))
                 row = cur.fetchone()
@@ -49,6 +52,7 @@ class SetupStore:
                     filter_dsl=FilterDsl(row[4]), prose_definition=row[5],
                     pitch_template_id=row[6], cover_letter_template_id=row[7],
                     auto_apply_enabled=row[8], escalation_config=row[9],
+                    ignored_clients=list(row[10] or []), tone_override=row[11],
                 )
 
     def list_active(self) -> List[Setup]:
@@ -57,7 +61,8 @@ class SetupStore:
                 cur.execute("""
                     SELECT setup_id, name, status, tier, filter_dsl, prose_definition,
                            pitch_template_id, cover_letter_template_id,
-                           auto_apply_enabled, escalation_config
+                           auto_apply_enabled, escalation_config,
+                           ignored_clients, tone_override
                     FROM setups WHERE status = 'active'
                     ORDER BY setup_id
                 """)
@@ -66,7 +71,8 @@ class SetupStore:
             Setup(setup_id=r[0], name=r[1], status=r[2], tier=r[3],
                   filter_dsl=FilterDsl(r[4]), prose_definition=r[5],
                   pitch_template_id=r[6], cover_letter_template_id=r[7],
-                  auto_apply_enabled=r[8], escalation_config=r[9])
+                  auto_apply_enabled=r[8], escalation_config=r[9],
+                  ignored_clients=list(r[10] or []), tone_override=r[11])
             for r in rows
         ]
 
