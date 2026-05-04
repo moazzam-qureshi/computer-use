@@ -36,6 +36,7 @@ from storage.enrichments import EnrichmentStore
 from storage.portfolio import PortfolioStore
 from storage.agent_runs import AgentRunStore
 from storage.scrape_runs import ScrapeRunStore
+from storage.conversations import SystemConfigStore
 from domain.humanization import Humanizer, default_envelope, CycleType
 from bidder.scan_cycle import run_one_cycle
 
@@ -105,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             portfolio=PortfolioStore(db),
             agent_runs=AgentRunStore(db),
             scrape_runs=ScrapeRunStore(db),
+            sysconfig=SystemConfigStore(db),
             on_signal=_print_signal,
         )
 

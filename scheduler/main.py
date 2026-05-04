@@ -47,6 +47,7 @@ from storage.agent_runs import AgentRunStore
 from storage.scrape_runs import ScrapeRunStore
 from storage.connects_ledger import ConnectsLedgerStore
 from storage.bidder_state import BidderStateStore
+from storage.conversations import SystemConfigStore
 from domain.humanization import Humanizer, default_envelope
 from bidder.scan_cycle import run_one_cycle
 from bidder.apply_executor import execute_approved_order
@@ -194,6 +195,7 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
                     portfolio=portfolio_store,
                     agent_runs=agent_runs,
                     scrape_runs=scrape_runs,
+                    sysconfig=SystemConfigStore(db),
                     on_signal=sync_on_signal,
                 )
             bidder_state.record_cycle_finish("succeeded")

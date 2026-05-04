@@ -19,6 +19,7 @@ from storage.enrichments import EnrichmentStore
 from storage.portfolio import PortfolioStore
 from storage.agent_runs import AgentRunStore
 from storage.scrape_runs import ScrapeRunStore
+from storage.conversations import SystemConfigStore
 from domain.humanization import Humanizer, CycleType
 from bidder.signal_pipeline import process_job_through_setups
 from bidder.draft_pipeline import draft_order
@@ -40,8 +41,12 @@ def run_one_cycle(
     portfolio: PortfolioStore,
     agent_runs: AgentRunStore,
     scrape_runs: ScrapeRunStore,
+    sysconfig: SystemConfigStore,
     on_signal,
 ) -> None:
+    if bool(sysconfig.get("bidder_paused") or False):
+        print("[scan] bidder paused via system_config; skipping cycle", flush=True)
+        return
     # Always full-scan. The humanizer's cycle-type mix (skim/no-op/panel-skim)
     # was an anti-detection nicety; in practice it costs real opportunities
     # and the operator prefers consistent coverage over behavioral camouflage.
