@@ -159,3 +159,62 @@ def test_validation_error_is_returned_not_raised(ctx, setup_id):
     set_tier = next(t for t in tools if t.name == "set_setup_tier")
     result = set_tier.invoke({"setup_id": setup_id, "tier": "bogus"})
     assert "error" in result
+
+
+def test_set_goal_then_get_goal(ctx):
+    tools = build_tools(ctx)
+    set_goal = next(t for t in tools if t.name == "set_goal")
+    get_goal = next(t for t in tools if t.name == "get_goal")
+    clear_goal = next(t for t in tools if t.name == "clear_goal")
+
+    # Start clean
+    clear_goal.invoke({})
+    assert "error" in get_goal.invoke({})
+
+    result = set_goal.invoke({
+        "prose": "Land 5 interviews per week from US clients $80+/hr",
+        "target_metric": "interviews_per_week",
+        "target_value": 5,
+        "horizon": "weekly",
+        "min_hourly": 80,
+        "preferred_country": "US",
+    })
+    assert "error" not in result
+    g = get_goal.invoke({})
+    assert g["prose"].startswith("Land 5 interviews")
+    assert g["target_value"] == 5
+    assert g["preferred_country"] == "US"
+
+
+def test_set_goal_replaces_previous(ctx):
+    tools = build_tools(ctx)
+    set_goal = next(t for t in tools if t.name == "set_goal")
+    get_goal = next(t for t in tools if t.name == "get_goal")
+    set_goal.invoke({"prose": "first goal"})
+    set_goal.invoke({"prose": "second goal"})
+    g = get_goal.invoke({})
+    assert g["prose"] == "second goal"
+
+
+def test_clear_goal_makes_get_return_error(ctx):
+    tools = build_tools(ctx)
+    set_goal = next(t for t in tools if t.name == "set_goal")
+    get_goal = next(t for t in tools if t.name == "get_goal")
+    clear_goal = next(t for t in tools if t.name == "clear_goal")
+    set_goal.invoke({"prose": "to be cleared"})
+    clear_goal.invoke({})
+    assert "error" in get_goal.invoke({})
+
+
+def test_revert_undoes_set_goal(ctx):
+    tools = build_tools(ctx)
+    set_goal = next(t for t in tools if t.name == "set_goal")
+    get_goal = next(t for t in tools if t.name == "get_goal")
+    clear_goal = next(t for t in tools if t.name == "clear_goal")
+    revert = next(t for t in tools if t.name == "revert_last_change")
+    clear_goal.invoke({})
+    set_goal.invoke({"prose": "goal A"})
+    set_goal.invoke({"prose": "goal B"})
+    revert.invoke({})  # should restore goal A as active
+    g = get_goal.invoke({})
+    assert g["prose"] == "goal A"

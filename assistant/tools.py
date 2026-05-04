@@ -18,6 +18,7 @@ from storage.conversations import (
     ConversationStore, AuditStore, SystemConfigStore,
 )
 from storage.connects_ledger import ConnectsLedgerStore
+from storage.goals import GoalStore, Goal
 
 
 class FiltersPatch(BaseModel):
@@ -158,6 +159,21 @@ def _setup_summary(s) -> dict:
     }
 
 
+def _goal_to_dict(g: Goal) -> dict:
+    return {
+        "goal_id": g.goal_id,
+        "prose": g.prose,
+        "target_metric": g.target_metric,
+        "target_value": float(g.target_value) if g.target_value is not None else None,
+        "horizon": g.horizon,
+        "min_hourly": float(g.min_hourly) if g.min_hourly is not None else None,
+        "min_budget": float(g.min_budget) if g.min_budget is not None else None,
+        "preferred_country": g.preferred_country,
+        "notes": g.notes,
+        "created_at": g.created_at.isoformat() if g.created_at else None,
+    }
+
+
 def _today_window():
     now = datetime.now(timezone.utc)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -180,6 +196,7 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
     portfolio = PortfolioStore(ctx.db)
     connects = ConnectsLedgerStore(ctx.db)
     sysconfig = SystemConfigStore(ctx.db)
+    goals = GoalStore(ctx.db)
 
     @tool
     def list_setups() -> list[dict]:
@@ -378,6 +395,14 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
             }
             for r in rows
         ]
+
+    @tool
+    def get_goal() -> dict:
+        """Return the operator's current active goal as a dict, or {error: ...} if none set."""
+        g = goals.get_active()
+        if g is None:
+            return {"error": "no active goal"}
+        return _goal_to_dict(g)
 
     # ---- write tools ----
 
@@ -686,6 +711,70 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool
+    def set_goal(
+        prose: str,
+        target_metric: Optional[str] = None,
+        target_value: Optional[float] = None,
+        horizon: Optional[str] = None,
+        min_hourly: Optional[float] = None,
+        min_budget: Optional[float] = None,
+        preferred_country: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> dict:
+        """Set or replace the operator's active goal. Free-text prose is required;
+        structured targets are optional. The new goal becomes the agent's north
+        star and is loaded into the system prompt every turn."""
+        if not prose or not prose.strip():
+            return {"error": "validation: prose is required"}
+
+        def before():
+            g = goals.get_active()
+            return None if g is None else _goal_to_dict(g)
+
+        def apply():
+            new_id = goals.create(Goal(
+                goal_id=None, prose=prose.strip(), target_metric=target_metric,
+                target_value=target_value, horizon=horizon, min_hourly=min_hourly,
+                min_budget=min_budget, preferred_country=preferred_country,
+                notes=notes,
+            ))
+            return {"goal_id": new_id, "prose": prose.strip()}
+
+        def after():
+            g = goals.get_active()
+            return None if g is None else _goal_to_dict(g)
+
+        return _audited_write(
+            ctx, tool_name="set_goal",
+            arguments={
+                "prose": prose, "target_metric": target_metric,
+                "target_value": target_value, "horizon": horizon,
+                "min_hourly": min_hourly, "min_budget": min_budget,
+                "preferred_country": preferred_country, "notes": notes,
+            },
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def clear_goal() -> dict:
+        """Deactivate the active goal. After this, there is no active goal."""
+        def before():
+            g = goals.get_active()
+            return None if g is None else _goal_to_dict(g)
+
+        def apply():
+            goals.clear_active()
+            return {"cleared": True}
+
+        def after():
+            return None  # no active goal after clear
+
+        return _audited_write(
+            ctx, tool_name="clear_goal", arguments={},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
     def revert_last_change() -> dict:
         """Revert the most recent write tool call in this conversation by
         applying its before_state. If the most recent entry was itself a
@@ -733,12 +822,14 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
     return [
         list_setups, get_setup, list_orders, get_job,
         recent_activity, connects_status, list_portfolio_items, search_jobs,
+        get_goal,
         update_setup_filters, add_ignored_client, remove_ignored_client,
         set_setup_tier, set_auto_apply,
         pause_setup, resume_setup, archive_setup,
         create_setup, set_connects_cap,
         pause_bidder, resume_bidder,
         update_pitch_tone,
+        set_goal, clear_goal,
         revert_last_change,
     ]
 
@@ -803,5 +894,37 @@ def _apply_revert(ctx: ToolContext, tool_name: str, arguments: dict, before_stat
     elif tool_name == "create_setup":
         # before_state is None for create; nothing to invert.
         pass
+    elif tool_name == "set_goal":
+        # before_state is either None (no prior goal) or the previous goal dict.
+        # Restore: clear current active, then if before_state is not None, recreate.
+        goals_store = GoalStore(ctx.db)
+        goals_store.clear_active()
+        if before_state is not None:
+            goals_store.create(Goal(
+                goal_id=None,
+                prose=before_state["prose"],
+                target_metric=before_state.get("target_metric"),
+                target_value=before_state.get("target_value"),
+                horizon=before_state.get("horizon"),
+                min_hourly=before_state.get("min_hourly"),
+                min_budget=before_state.get("min_budget"),
+                preferred_country=before_state.get("preferred_country"),
+                notes=before_state.get("notes"),
+            ))
+    elif tool_name == "clear_goal":
+        # before_state is either None (clearing was a no-op) or the prior goal dict.
+        if before_state is not None:
+            goals_store = GoalStore(ctx.db)
+            goals_store.create(Goal(
+                goal_id=None,
+                prose=before_state["prose"],
+                target_metric=before_state.get("target_metric"),
+                target_value=before_state.get("target_value"),
+                horizon=before_state.get("horizon"),
+                min_hourly=before_state.get("min_hourly"),
+                min_budget=before_state.get("min_budget"),
+                preferred_country=before_state.get("preferred_country"),
+                notes=before_state.get("notes"),
+            ))
     else:
         raise ValueError(f"no revert handler for tool {tool_name!r}")
