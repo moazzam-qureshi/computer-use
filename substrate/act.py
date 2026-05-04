@@ -273,20 +273,32 @@ def scroll(amount: int, method: str = "key") -> None:
     """Scroll the focused window/panel.
 
     Positive amount = down, negative = up. `amount` is in 'clicks'
-    (loosely 1 click = one Page Down or one wheel notch).
+    (loosely 1 click = one Page Down, one Down-arrow press, or one wheel notch).
 
     method:
-      'key'   — Page Down / Page Up. Goes to focused element. RELIABLE for
-                modal panels and any context where the cursor isn't hovering
-                the scroll surface. Default.
-      'wheel' — mouse wheel at current cursor position. Use when 'key' doesn't
-                work (some sites trap arrow keys for navigation).
+      'key'   — Page Down / Page Up. Big jumps (~800px). Goes to focused
+                element. Risky on the feed because it can skip past cards
+                between successive scans.
+      'arrow' — Down arrow / Up arrow. Small jumps (~40px). Goes to focused
+                element. The default for any context where you need precise
+                advance and don't care about cursor position. RELIABLE on
+                the feed because every card is observed before the next
+                scroll lifts it out of the viewport.
+      'wheel' — Mouse wheel at current cursor position. Brittle: silently
+                no-ops if the cursor isn't on the scrollable area (e.g. on
+                a multi-monitor setup, in a VM, or after a click_xy that
+                left the cursor in a sidebar). Avoid for new code.
     """
     require_focus()
     pacing.get_pacer().before_action("scroll")
     _trace(f"scroll amount={amount} method={method}")
     if method == "key":
         keyname = "pagedown" if amount > 0 else "pageup"
+        for _ in range(abs(amount)):
+            pyautogui.press(keyname)
+            time.sleep(random.uniform(0.05, 0.12))
+    elif method == "arrow":
+        keyname = "down" if amount > 0 else "up"
         for _ in range(abs(amount)):
             pyautogui.press(keyname)
             time.sleep(random.uniform(0.05, 0.12))

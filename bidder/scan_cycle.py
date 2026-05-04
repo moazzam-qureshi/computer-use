@@ -85,7 +85,12 @@ def run_one_cycle(
                 print("[scan] end of feed reached, stopping", flush=True)
                 break
             act.focus_window(WINDOW)
-            act.scroll(3, method="wheel")
+            # Down-arrow keys land on the focused window regardless of
+            # cursor position. Wheel scroll silently no-ops if the cursor
+            # isn't over Chrome's content area, which happens on VMs and
+            # multi-monitor setups after click_xy events leave the cursor
+            # in a sidebar. ~8 arrow presses ≈ one card height.
+            act.scroll(8, method="arrow")
             time.sleep(1.0)
             continue
 
@@ -194,9 +199,11 @@ def run_one_cycle(
 
         # After processing this batch, scroll for more cards.
         if evaluated < max_jobs:
-            print("[scan] wheel-scroll for more cards", flush=True)
+            print("[scan] arrow-scroll for more cards", flush=True)
             act.focus_window(WINDOW)
-            act.scroll(3, method="wheel")
+            # See note above: arrow keys are reliable across host/VM/multi-mon
+            # setups in a way that mouse-wheel-at-cursor isn't.
+            act.scroll(8, method="arrow")
             time.sleep(0.9)
 
     scrape_runs.update_counts(run_id, jobs_seen=seen, jobs_new=new, jobs_signaled=signaled)
