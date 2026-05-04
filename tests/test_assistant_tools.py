@@ -87,3 +87,75 @@ def test_list_portfolio_items_runs(ctx):
     lp = next(t for t in tools if t.name == "list_portfolio_items")
     result = lp.invoke({})
     assert isinstance(result, list)
+
+
+def test_update_setup_filters_merges(ctx, setup_id):
+    tools = build_tools(ctx)
+    update = next(t for t in tools if t.name == "update_setup_filters")
+    result = update.invoke({
+        "setup_id": setup_id,
+        "patch": {"min_budget": 500, "required_skills": ["python", "rag"]},
+    })
+    assert "error" not in result
+    get_setup = next(t for t in tools if t.name == "get_setup")
+    s = get_setup.invoke({"setup_id": setup_id})
+    text = str(s["filter_dsl"])
+    assert "500" in text
+    assert "python" in text
+
+
+def test_add_and_remove_ignored_client(ctx, setup_id):
+    tools = build_tools(ctx)
+    add = next(t for t in tools if t.name == "add_ignored_client")
+    rem = next(t for t in tools if t.name == "remove_ignored_client")
+    add.invoke({"setup_id": setup_id, "client_name": "Acme Corp"})
+    add.invoke({"setup_id": setup_id, "client_name": "Acme Corp"})  # idempotent
+    s = next(t for t in tools if t.name == "get_setup").invoke({"setup_id": setup_id})
+    assert s["ignored_clients"].count("Acme Corp") == 1
+    rem.invoke({"setup_id": setup_id, "client_name": "Acme Corp"})
+    s = next(t for t in tools if t.name == "get_setup").invoke({"setup_id": setup_id})
+    assert "Acme Corp" not in s["ignored_clients"]
+
+
+def test_status_transitions(ctx, setup_id):
+    tools = build_tools(ctx)
+    pause = next(t for t in tools if t.name == "pause_setup")
+    resume = next(t for t in tools if t.name == "resume_setup")
+    pause.invoke({"setup_id": setup_id})
+    s = next(t for t in tools if t.name == "get_setup").invoke({"setup_id": setup_id})
+    assert s["status"] == "disabled"
+    resume.invoke({"setup_id": setup_id})
+    s = next(t for t in tools if t.name == "get_setup").invoke({"setup_id": setup_id})
+    assert s["status"] == "active"
+
+
+def test_bidder_pause_resume_writes_system_config(ctx):
+    tools = build_tools(ctx)
+    pause = next(t for t in tools if t.name == "pause_bidder")
+    resume = next(t for t in tools if t.name == "resume_bidder")
+    pause.invoke({})
+    cs = next(t for t in tools if t.name == "connects_status").invoke({})
+    assert cs["bidder_paused"] is True
+    resume.invoke({})
+    cs = next(t for t in tools if t.name == "connects_status").invoke({})
+    assert cs["bidder_paused"] is False
+
+
+def test_revert_last_change_undoes_pause(ctx, setup_id):
+    tools = build_tools(ctx)
+    get_setup = next(t for t in tools if t.name == "get_setup")
+    pause = next(t for t in tools if t.name == "pause_setup")
+    revert = next(t for t in tools if t.name == "revert_last_change")
+    next(t for t in tools if t.name == "resume_setup").invoke({"setup_id": setup_id})
+    pause.invoke({"setup_id": setup_id})
+    assert get_setup.invoke({"setup_id": setup_id})["status"] == "disabled"
+    rv = revert.invoke({})
+    assert "error" not in rv
+    assert get_setup.invoke({"setup_id": setup_id})["status"] == "active"
+
+
+def test_validation_error_is_returned_not_raised(ctx, setup_id):
+    tools = build_tools(ctx)
+    set_tier = next(t for t in tools if t.name == "set_setup_tier")
+    result = set_tier.invoke({"setup_id": setup_id, "tier": "bogus"})
+    assert "error" in result

@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional, List
 
 from langchain_core.tools import tool, BaseTool
 from psycopg.types.json import Json
+from pydantic import BaseModel, ValidationError
 
 from storage.connection import Database
 from storage.setups import SetupStore
@@ -17,6 +18,62 @@ from storage.conversations import (
     ConversationStore, AuditStore, SystemConfigStore,
 )
 from storage.connects_ledger import ConnectsLedgerStore
+
+
+class FiltersPatch(BaseModel):
+    """Allowed filter-patch keys. Validated before merging into filter_dsl."""
+    min_budget: Optional[float] = None
+    max_budget: Optional[float] = None
+    exclude_fixed_under: Optional[float] = None
+    min_hourly: Optional[float] = None
+    max_hourly: Optional[float] = None
+    required_skills: Optional[list[str]] = None
+    excluded_skills: Optional[list[str]] = None
+    min_client_spend: Optional[float] = None
+    payment_verified_required: Optional[bool] = None
+    excluded_durations: Optional[list[str]] = None
+
+
+def _patch_to_filter_rules(patch: FiltersPatch) -> list[dict]:
+    """Convert a patch into a list of filter_dsl rules."""
+    rules: list[dict] = []
+    if patch.min_budget is not None:
+        rules.append({"budget_min_at_least": patch.min_budget})
+    if patch.required_skills:
+        rules.append({"skill_in": patch.required_skills})
+    if patch.payment_verified_required is True:
+        rules.append({"client_payment_verified": True})
+    if patch.max_budget is not None:
+        rules.append({"budget_max_at_most": patch.max_budget})
+    if patch.exclude_fixed_under is not None:
+        rules.append({"exclude_fixed_under": patch.exclude_fixed_under})
+    if patch.min_hourly is not None:
+        rules.append({"min_hourly": patch.min_hourly})
+    if patch.max_hourly is not None:
+        rules.append({"max_hourly": patch.max_hourly})
+    if patch.excluded_skills:
+        rules.append({"excluded_skills": patch.excluded_skills})
+    if patch.min_client_spend is not None:
+        rules.append({"min_client_spend": patch.min_client_spend})
+    if patch.excluded_durations:
+        rules.append({"excluded_durations": patch.excluded_durations})
+    return rules
+
+
+def _merge_filter_rules(existing_spec: dict, new_rules: list[dict]) -> dict:
+    """Merge new rules into an existing all_of spec. New rules with the same
+    top-level key replace the old ones."""
+    if not existing_spec:
+        return {"all_of": new_rules}
+    if "all_of" in existing_spec:
+        old_rules = existing_spec["all_of"]
+    elif "any_of" in existing_spec:
+        old_rules = existing_spec["any_of"]
+    else:
+        old_rules = [existing_spec]
+    new_keys = {list(r.keys())[0] for r in new_rules}
+    kept = [r for r in old_rules if list(r.keys())[0] not in new_keys]
+    return {"all_of": kept + new_rules}
 
 
 @dataclass
@@ -322,7 +379,429 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
             for r in rows
         ]
 
+    # ---- write tools ----
+
+    @tool
+    def update_setup_filters(setup_id: int, patch: dict) -> dict:
+        """Merge filter rules into a setup. patch keys: min_budget, max_budget,
+        exclude_fixed_under, min_hourly, max_hourly, required_skills,
+        excluded_skills, min_client_spend, payment_verified_required,
+        excluded_durations. Existing rules with the same key are replaced."""
+        try:
+            patch_obj = FiltersPatch(**patch)
+        except ValidationError as e:
+            return {"error": f"validation: {e}"}
+        new_rules = _patch_to_filter_rules(patch_obj)
+        if not new_rules:
+            return {"error": "patch contained no recognized keys"}
+
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"filter_dsl": s.filter_dsl.spec}
+
+        def apply():
+            s = setups.get(setup_id)
+            if s is None:
+                raise ValueError(f"setup {setup_id} not found")
+            merged = _merge_filter_rules(s.filter_dsl.spec, new_rules)
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE setups SET filter_dsl = %s WHERE setup_id = %s",
+                        (Json(merged), setup_id),
+                    )
+            return {"setup_id": setup_id, "filter_dsl": merged}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"filter_dsl": s.filter_dsl.spec}
+
+        return _audited_write(
+            ctx, tool_name="update_setup_filters",
+            arguments={"setup_id": setup_id, "patch": patch},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def add_ignored_client(setup_id: int, client_name: str) -> dict:
+        """Add a client name to a setup's ignore list. Idempotent."""
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"ignored_clients": list(s.ignored_clients)}
+
+        def apply():
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE setups
+                           SET ignored_clients = (
+                               SELECT array_agg(DISTINCT x)
+                               FROM unnest(ignored_clients || ARRAY[%s]) x
+                           )
+                           WHERE setup_id = %s""",
+                        (client_name, setup_id),
+                    )
+            return {"setup_id": setup_id, "added": client_name}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"ignored_clients": list(s.ignored_clients)}
+
+        return _audited_write(
+            ctx, tool_name="add_ignored_client",
+            arguments={"setup_id": setup_id, "client_name": client_name},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def remove_ignored_client(setup_id: int, client_name: str) -> dict:
+        """Remove a client name from a setup's ignore list. No-op if absent."""
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"ignored_clients": list(s.ignored_clients)}
+
+        def apply():
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE setups SET ignored_clients = array_remove(ignored_clients, %s) WHERE setup_id = %s",
+                        (client_name, setup_id),
+                    )
+            return {"setup_id": setup_id, "removed": client_name}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"ignored_clients": list(s.ignored_clients)}
+
+        return _audited_write(
+            ctx, tool_name="remove_ignored_client",
+            arguments={"setup_id": setup_id, "client_name": client_name},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def set_setup_tier(setup_id: int, tier: str) -> dict:
+        """Set a setup's tier. Allowed values: quiet, normal, critical."""
+        if tier not in ("quiet", "normal", "critical"):
+            return {"error": f"validation: tier must be quiet|normal|critical, got {tier!r}"}
+
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"tier": s.tier}
+
+        def apply():
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE setups SET tier = %s WHERE setup_id = %s", (tier, setup_id))
+            return {"setup_id": setup_id, "tier": tier}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"tier": s.tier}
+
+        return _audited_write(
+            ctx, tool_name="set_setup_tier",
+            arguments={"setup_id": setup_id, "tier": tier},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def set_auto_apply(setup_id: int, enabled: bool) -> dict:
+        """Toggle a setup's auto_apply_enabled flag."""
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"auto_apply_enabled": s.auto_apply_enabled}
+
+        def apply():
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE setups SET auto_apply_enabled = %s WHERE setup_id = %s",
+                        (enabled, setup_id),
+                    )
+            return {"setup_id": setup_id, "auto_apply_enabled": enabled}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"auto_apply_enabled": s.auto_apply_enabled}
+
+        return _audited_write(
+            ctx, tool_name="set_auto_apply",
+            arguments={"setup_id": setup_id, "enabled": enabled},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    def _make_status_tool(name: str, target_status: str, narrative: str):
+        @tool(name, description=narrative)
+        def _f(setup_id: int) -> dict:
+            def before():
+                s = setups.get(setup_id)
+                return None if s is None else {"status": s.status}
+
+            def apply():
+                setups.update_status(setup_id, target_status)
+                return {"setup_id": setup_id, "status": target_status}
+
+            def after():
+                s = setups.get(setup_id)
+                return None if s is None else {"status": s.status}
+
+            return _audited_write(
+                ctx, tool_name=name,
+                arguments={"setup_id": setup_id},
+                capture_before=before, apply_mutation=apply, capture_after=after,
+            )
+        return _f
+
+    pause_setup = _make_status_tool(
+        "pause_setup", "disabled",
+        "Pause a setup. Sets status='disabled'. Bidder will skip it on the next cycle.",
+    )
+    resume_setup = _make_status_tool(
+        "resume_setup", "active",
+        "Resume a setup. Sets status='active'.",
+    )
+    archive_setup = _make_status_tool(
+        "archive_setup", "retired",
+        "Archive a setup. Sets status='retired' (soft-delete; row stays for audit).",
+    )
+
+    @tool
+    def create_setup(name: str, tier: str, filters: dict, prose: str) -> dict:
+        """Create a new Setup. tier: quiet|normal|critical. filters is a patch
+        in the same shape update_setup_filters accepts. prose is a free-text
+        description (used by the relevance tie-break LLM)."""
+        if tier not in ("quiet", "normal", "critical"):
+            return {"error": f"validation: tier must be quiet|normal|critical, got {tier!r}"}
+        try:
+            patch_obj = FiltersPatch(**filters)
+        except ValidationError as e:
+            return {"error": f"validation: {e}"}
+        rules = _patch_to_filter_rules(patch_obj)
+        spec = {"all_of": rules}
+
+        def apply():
+            from domain.types import Setup, FilterDsl
+            new_id = setups.create(Setup(
+                setup_id=0, name=name, status="active", tier=tier,
+                filter_dsl=FilterDsl(spec), prose_definition=prose,
+                pitch_template_id=None, cover_letter_template_id=None,
+                auto_apply_enabled=False, escalation_config={},
+            ))
+            return {"setup_id": new_id, "name": name, "tier": tier}
+
+        return _audited_write(
+            ctx, tool_name="create_setup",
+            arguments={"name": name, "tier": tier, "filters": filters, "prose": prose},
+            capture_before=lambda: None, apply_mutation=apply,
+            capture_after=lambda: None,
+        )
+
+    @tool
+    def set_connects_cap(daily: Optional[int] = None, weekly: Optional[int] = None) -> dict:
+        """Override connects caps via system_config. Pass daily and/or weekly.
+        Bidder reads these on next cycle, falls back to env if unset."""
+        if daily is None and weekly is None:
+            return {"error": "validation: must provide daily and/or weekly"}
+
+        def before():
+            return {
+                "daily": sysconfig.get("connects_daily_cap"),
+                "weekly": sysconfig.get("connects_weekly_cap"),
+            }
+
+        def apply():
+            if daily is not None:
+                sysconfig.set("connects_daily_cap", int(daily))
+            if weekly is not None:
+                sysconfig.set("connects_weekly_cap", int(weekly))
+            return {"daily": daily, "weekly": weekly}
+
+        def after():
+            return {
+                "daily": sysconfig.get("connects_daily_cap"),
+                "weekly": sysconfig.get("connects_weekly_cap"),
+            }
+
+        return _audited_write(
+            ctx, tool_name="set_connects_cap",
+            arguments={"daily": daily, "weekly": weekly},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    def _make_bidder_pause_tool(name: str, target: bool, narrative: str):
+        @tool(name, description=narrative)
+        def _f() -> dict:
+            def before():
+                return {"bidder_paused": bool(sysconfig.get("bidder_paused") or False)}
+
+            def apply():
+                sysconfig.set("bidder_paused", target)
+                return {"bidder_paused": target}
+
+            def after():
+                return {"bidder_paused": bool(sysconfig.get("bidder_paused") or False)}
+
+            return _audited_write(
+                ctx, tool_name=name, arguments={},
+                capture_before=before, apply_mutation=apply, capture_after=after,
+            )
+        return _f
+
+    pause_bidder = _make_bidder_pause_tool(
+        "pause_bidder", True,
+        "Pause the bidder loop. Next cycle exits early without scanning.",
+    )
+    resume_bidder = _make_bidder_pause_tool(
+        "resume_bidder", False, "Resume the bidder loop.",
+    )
+
+    @tool
+    def update_pitch_tone(setup_id: int, tone_notes: str) -> dict:
+        """Set a per-setup tone override. The proposal generator prepends this
+        to its prompt as an 'Operator note on tone' section. Empty string clears it."""
+        normalized = tone_notes.strip() or None
+
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"tone_override": s.tone_override}
+
+        def apply():
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE setups SET tone_override = %s WHERE setup_id = %s",
+                        (normalized, setup_id),
+                    )
+            return {"setup_id": setup_id, "tone_override": normalized}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"tone_override": s.tone_override}
+
+        return _audited_write(
+            ctx, tool_name="update_pitch_tone",
+            arguments={"setup_id": setup_id, "tone_notes": tone_notes},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def revert_last_change() -> dict:
+        """Revert the most recent write tool call in this conversation by
+        applying its before_state. If the most recent entry was itself a
+        revert, walks back one more."""
+        audit = AuditStore(ctx.db)
+        last = audit.last_for_conversation(ctx.conversation_id)
+        if last is None:
+            return {"error": "nothing to revert"}
+        if last["tool_name"] == "revert_last_change":
+            with ctx.db.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT audit_id, tool_name, arguments, before_state
+                           FROM assistant_audit_log
+                           WHERE conversation_id = %s AND tool_name <> 'revert_last_change'
+                           ORDER BY audit_id DESC LIMIT 1""",
+                        (ctx.conversation_id,),
+                    )
+                    row = cur.fetchone()
+            if row is None:
+                return {"error": "nothing to revert"}
+            tool_name, arguments, before_state = row[1], row[2], row[3]
+        else:
+            tool_name = last["tool_name"]
+            arguments = last["arguments"]
+            before_state = last["before_state"]
+        if before_state is None:
+            return {"error": f"audit row for {tool_name} has no before_state; cannot revert"}
+
+        try:
+            _apply_revert(ctx, tool_name, arguments, before_state)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"revert failed: {e}"}
+
+        audit.record(
+            conversation_id=ctx.conversation_id,
+            tool_name="revert_last_change",
+            arguments={"reverted_tool": tool_name, "reverted_arguments": arguments},
+            result={"restored_state": before_state},
+            before_state=None,
+            after_state=before_state,
+        )
+        return {"reverted_tool": tool_name, "restored_state": before_state}
+
     return [
         list_setups, get_setup, list_orders, get_job,
         recent_activity, connects_status, list_portfolio_items, search_jobs,
+        update_setup_filters, add_ignored_client, remove_ignored_client,
+        set_setup_tier, set_auto_apply,
+        pause_setup, resume_setup, archive_setup,
+        create_setup, set_connects_cap,
+        pause_bidder, resume_bidder,
+        update_pitch_tone,
+        revert_last_change,
     ]
+
+
+def _apply_revert(ctx: ToolContext, tool_name: str, arguments: dict, before_state: dict) -> None:
+    """Inverse mutations keyed by tool_name. Each branch knows how to write
+    before_state back to the affected row(s)."""
+    setups_store = SetupStore(ctx.db)
+    sysconfig = SystemConfigStore(ctx.db)
+    if tool_name in ("pause_setup", "resume_setup", "archive_setup"):
+        setups_store.update_status(arguments["setup_id"], before_state["status"])
+    elif tool_name == "set_setup_tier":
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE setups SET tier = %s WHERE setup_id = %s",
+                    (before_state["tier"], arguments["setup_id"]),
+                )
+    elif tool_name == "set_auto_apply":
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE setups SET auto_apply_enabled = %s WHERE setup_id = %s",
+                    (before_state["auto_apply_enabled"], arguments["setup_id"]),
+                )
+    elif tool_name == "update_setup_filters":
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE setups SET filter_dsl = %s WHERE setup_id = %s",
+                    (Json(before_state["filter_dsl"]), arguments["setup_id"]),
+                )
+    elif tool_name in ("add_ignored_client", "remove_ignored_client"):
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE setups SET ignored_clients = %s WHERE setup_id = %s",
+                    (list(before_state["ignored_clients"]), arguments["setup_id"]),
+                )
+    elif tool_name == "update_pitch_tone":
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE setups SET tone_override = %s WHERE setup_id = %s",
+                    (before_state["tone_override"], arguments["setup_id"]),
+                )
+    elif tool_name == "set_connects_cap":
+        if before_state.get("daily") is None:
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM system_config WHERE key = 'connects_daily_cap'")
+        else:
+            sysconfig.set("connects_daily_cap", before_state["daily"])
+        if before_state.get("weekly") is None:
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM system_config WHERE key = 'connects_weekly_cap'")
+        else:
+            sysconfig.set("connects_weekly_cap", before_state["weekly"])
+    elif tool_name in ("pause_bidder", "resume_bidder"):
+        sysconfig.set("bidder_paused", before_state["bidder_paused"])
+    elif tool_name == "create_setup":
+        # before_state is None for create; nothing to invert.
+        pass
+    else:
+        raise ValueError(f"no revert handler for tool {tool_name!r}")
