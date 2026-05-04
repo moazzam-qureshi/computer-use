@@ -49,6 +49,7 @@ from storage.scrape_runs import ScrapeRunStore
 from storage.connects_ledger import ConnectsLedgerStore
 from storage.bidder_state import BidderStateStore
 from storage.conversations import SystemConfigStore
+from storage.scan_briefs import BriefStore
 from domain.humanization import Humanizer, default_envelope
 from bidder.scan_cycle import run_one_cycle
 from bidder.apply_executor import execute_approved_order
@@ -92,6 +93,34 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
     agent_runs = AgentRunStore(db)
     scrape_runs = ScrapeRunStore(db)
     bidder_state = BidderStateStore(db)
+    brief_store = BriefStore(db)
+
+    # on_signal is invoked by the bidder when a job matches a setup. For
+    # briefed scans we suppress the channel embed; the brief-watcher DMs
+    # the operator a summary instead.
+    async def on_signal(signal, order, job):
+        if (signal.market_state or {}).get("source") == "briefed_scan":
+            print(f"[bidder] suppressing channel post for briefed-scan signal_id={signal.signal_id}", flush=True)
+            return
+        setup = setups_store.get(signal.primary_setup_id)
+        primary_match = next(
+            (m for m in signal.matched_setups if m.get("setup_id") == signal.primary_setup_id),
+            signal.matched_setups[0] if signal.matched_setups else {},
+        )
+        application_flags = primary_match.get("application_flags") or []
+        embed = build_signal_embed(
+            setup_name=setup.name, tier=setup.tier, title=job.title,
+            budget_text=f"{job.budget_kind} ${job.budget_min_usd or 0:.0f}",
+            posted_text=job.posted_text or "recent", client_summary=job.client_country or "?",
+            why_matched=", ".join([m["matched_rules"][0] if m.get("matched_rules") else "" for m in signal.matched_setups]),
+            cover_letter_preview=order.cover_letter_body or "",
+            application_flags=application_flags,
+        )
+        view = OrderApprovalView(order_id=order.order_id, doc_url=order.doc_url or "")
+        await channel.send(embed=embed, view=view)
+
+    def sync_on_signal(signal, order, job):
+        asyncio.run_coroutine_threadsafe(on_signal(signal, order, job), bot.loop)
 
     first_cycle = True
     # Inter-cycle deadline. When the loop decides "no cycle yet," it picks a
@@ -156,31 +185,53 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
             await asyncio.sleep(60)
             continue
 
+        # Briefed scan: agent-triggered, async. Consume one pending brief at the
+        # top of the work-doing portion of the loop. If one is pending, it
+        # preempts the scheduled cycle and runs an ephemeral cycle against
+        # the brief's filter_dsl. The brief-watcher DMs the operator the
+        # result summary; the channel webhook is suppressed via on_signal.
+        pending_brief = brief_store.consume_pending()
+        if pending_brief is not None:
+            print(f"[bidder] consuming brief brief_id={pending_brief.brief_id}", flush=True)
+            try:
+                async with ui_lock:
+                    await asyncio.to_thread(
+                        _with_com,
+                        run_one_cycle,
+                        humanizer=humanizer,
+                        setups_store=setups_store,
+                        signal_store=signal_store,
+                        job_store=job_store,
+                        order_store=order_store,
+                        enrichment_store=enrichment_store,
+                        portfolio=portfolio_store,
+                        agent_runs=agent_runs,
+                        scrape_runs=scrape_runs,
+                        sysconfig=SystemConfigStore(db),
+                        on_signal=sync_on_signal,
+                        brief=pending_brief,
+                    )
+                # Tally results from the brief's persisted setup.
+                with db.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT count(*) FROM orders WHERE setup_id = (SELECT setup_id FROM scan_briefs WHERE brief_id = %s)",
+                            (pending_brief.brief_id,),
+                        )
+                        drafts = cur.fetchone()[0]
+                brief_store.mark_done(
+                    pending_brief.brief_id,
+                    result_summary={"drafts_created": drafts},
+                    cycle_notes="ok",
+                )
+                print(f"[bidder] brief brief_id={pending_brief.brief_id} done; drafts={drafts}", flush=True)
+            except Exception as e:
+                print(f"[bidder] brief brief_id={pending_brief.brief_id} failed: {e!r}", flush=True)
+                brief_store.mark_failed(pending_brief.brief_id, error=repr(e)[:500])
+            # Skip the scheduled-cycle path this iteration; loop and re-check.
+            continue
+
         bidder_state.record_cycle_start()
-
-        async def on_signal(signal, order, job):
-            setup = setups_store.get(signal.primary_setup_id)
-            # Pull flags from the primary setup's match payload. Older signals
-            # written before the application_flags wiring landed will return
-            # an empty list cleanly via .get() defaulting.
-            primary_match = next(
-                (m for m in signal.matched_setups if m.get("setup_id") == signal.primary_setup_id),
-                signal.matched_setups[0] if signal.matched_setups else {},
-            )
-            application_flags = primary_match.get("application_flags") or []
-            embed = build_signal_embed(
-                setup_name=setup.name, tier=setup.tier, title=job.title,
-                budget_text=f"{job.budget_kind} ${job.budget_min_usd or 0:.0f}",
-                posted_text=job.posted_text or "recent", client_summary=job.client_country or "?",
-                why_matched=", ".join([m["matched_rules"][0] if m.get("matched_rules") else "" for m in signal.matched_setups]),
-                cover_letter_preview=order.cover_letter_body or "",
-                application_flags=application_flags,
-            )
-            view = OrderApprovalView(order_id=order.order_id, doc_url=order.doc_url or "")
-            await channel.send(embed=embed, view=view)
-
-        def sync_on_signal(signal, order, job):
-            asyncio.run_coroutine_threadsafe(on_signal(signal, order, job), bot.loop)
 
         try:
             async with ui_lock:
