@@ -80,7 +80,7 @@ def run_turn(
     with CostTracker(
         agent_run_store,
         agent_name="assistant",
-        trigger="discord_dm",
+        trigger="discord_question",
         trigger_context={"conversation_id": conversation_id, "discord_user_id": discord_user_id},
     ) as tracker:
         agent = create_agent(model=_model(), tools=tools)
