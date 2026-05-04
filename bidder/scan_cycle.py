@@ -117,29 +117,27 @@ def run_one_cycle(
                 print(f"[scan]   skip-for-now: '{title[:60]}' y={mid_y} below safe click zone; will retry after scroll", flush=True)
                 continue
 
-            # PRE-CLICK DEDUP. Two layers, URL first (perfect), then title
-            # fallback (95%+ accurate). Either match means we already have
-            # this job in the DB, so skip without opening the panel.
+            # PRE-CLICK DEDUP + EARLY EXIT.
             #
-            # Layer 1: read the title hyperlink's URL via UIA's ValuePattern
-            # (already populated on the Element). Some Chrome accessibility
-            # implementations expose the href; some leave it empty. When
-            # present, this is a perfect identifier.
+            # 'Most Recent' is sorted newest-first. The moment we see a card
+            # we already have in the DB, every card after it is also already
+            # known (by definition of the sort). So we end the cycle right
+            # there instead of paying ~30s of panel walk per known card.
+            #
+            # Two ways to detect "known": URL (perfect, when Chrome exposes
+            # the hyperlink's href via UIA ValuePattern) and title (95%+
+            # accurate fallback against the last-14d titles index). Either
+            # match triggers early-exit.
             link_value = (getattr(title_el, "value", None) or "").strip()
             preclick_job_id = _job_id_from_url(link_value) if "~" in link_value else ""
             if preclick_job_id and preclick_job_id != link_value and job_store.is_known(preclick_job_id):
-                seen_titles.add(title)
-                print(f"[scan]   pre-click skip (URL match): '{title[:60]}' job_id={preclick_job_id}", flush=True)
-                continue
-
-            # Layer 2: title-based dedup against the recent-jobs index. Title
-            # collisions across distinct posts within 14d are rare on
-            # 'Most Recent' so the false-positive cost is acceptable for the
-            # ~30s of panel walk it saves.
+                print(f"[scan] hit known card (URL match): '{title[:60]}' job_id={preclick_job_id}; ending cycle", flush=True)
+                evaluated = max_jobs  # break the outer while loop too
+                break
             if title.strip().lower() in known_titles_lower:
-                seen_titles.add(title)
-                print(f"[scan]   pre-click skip (title match): '{title[:60]}'", flush=True)
-                continue
+                print(f"[scan] hit known card (title match): '{title[:60]}'; ending cycle", flush=True)
+                evaluated = max_jobs
+                break
 
             seen_titles.add(title)
             evaluated += 1
