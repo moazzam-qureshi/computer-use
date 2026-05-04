@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Optional
 
 from langchain.agents import create_agent
 
 from storage.connection import Database
 from storage.agent_runs import AgentRunStore
+from storage.goals import GoalStore, Goal
 from ai.cost_tracker import CostTracker
 
 from assistant.prompts import SYSTEM_PROMPT
@@ -15,6 +16,33 @@ from assistant.tools import ToolContext, build_tools
 from assistant.conversation import (
     load_history, append_user, append_assistant, maybe_summarize,
 )
+
+
+def _render_goal_section(goal: Optional[Goal]) -> str:
+    if goal is None:
+        return (
+            "=== No Goal Set ===\n"
+            "The operator has not set an active goal. If they describe what "
+            "they want from the system, suggest setting one with set_goal so "
+            "future decisions can orient around it.\n"
+            "==================="
+        )
+    lines = ["=== Operator's Active Goal ===", f'"{goal.prose}"']
+    if goal.target_value is not None and goal.target_metric and goal.horizon:
+        lines.append(f"Targets: {goal.target_value} {goal.target_metric} per {goal.horizon}")
+    filters = []
+    if goal.min_hourly is not None:
+        filters.append(f"min hourly ${goal.min_hourly}")
+    if goal.min_budget is not None:
+        filters.append(f"min budget ${goal.min_budget}")
+    if goal.preferred_country:
+        filters.append(f"prefers {goal.preferred_country}")
+    if filters:
+        lines.append("Filters: " + ", ".join(filters))
+    if goal.notes:
+        lines.append(f"Notes: {goal.notes}")
+    lines.append("==============================")
+    return "\n".join(lines)
 
 
 def _model() -> str:
@@ -63,7 +91,11 @@ def run_turn(
     append_user(db, conversation_id, user_message)
     history = load_history(db, conversation_id, window=_history_window())
 
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    goal = GoalStore(db).get_active()
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _render_goal_section(goal)},
+    ]
     if history["summary"]:
         messages.append({
             "role": "system",
