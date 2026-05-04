@@ -223,7 +223,7 @@ def run_one_cycle(
                 print("[scan]   SETUP MATCHED -> drafting Doc + cover letter", flush=True)
                 order = draft_order(
                     job, order, portfolio=portfolio, order_store=order_store,
-                    agent_run_store=agent_runs,
+                    agent_run_store=agent_runs, setups_store=setups_store,
                 )
                 signaled += 1
                 on_signal(signal, order, job)

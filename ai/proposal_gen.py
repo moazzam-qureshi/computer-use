@@ -94,6 +94,7 @@ def generate_proposal(
     agent_run_store: AgentRunStore,
     parent_run_id: Optional[int] = None,
     model: str = "gpt-4o-mini",
+    tone_override: Optional[str] = None,
 ) -> ProposalDraft:
     """One LLM call (raw JSON), then coerce into ProposalDraft."""
     portfolio_summary = "\n".join(
@@ -111,6 +112,15 @@ def generate_proposal(
     # using response_format=json_object. Append a one-line trailing instruction.
     user_with_json_hint = user + "\n\nReturn ONLY a JSON object with the fields above. No preamble, no markdown fences."
 
+    # Operator override on tone (set via the assistant's update_pitch_tone tool).
+    system_content = PROPOSAL_SYSTEM
+    if tone_override:
+        system_content = (
+            "Operator note on tone (high priority, follow this):\n"
+            f"{tone_override}\n\n"
+            + system_content
+        )
+
     client = OpenAI()
     with CostTracker(
         agent_run_store,
@@ -122,7 +132,7 @@ def generate_proposal(
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": PROPOSAL_SYSTEM},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_with_json_hint},
             ],
             temperature=0.4,
@@ -191,6 +201,7 @@ def generate_cover_letter(
     parent_run_id: Optional[int] = None,
     model: str = "gpt-5-mini",
     system_prompt_override: Optional[str] = None,
+    tone_override: Optional[str] = None,
 ) -> CoverLetter:
     """Per-job operator-voice cover letter via gpt-4o-mini.
 
@@ -211,6 +222,14 @@ def generate_cover_letter(
         client_name=detected_client_name or "(none, use 'Hey,')",
     )
 
+    base_system = system_prompt_override or COVER_LETTER_SYSTEM
+    if tone_override:
+        base_system = (
+            "Operator note on tone (high priority, follow this):\n"
+            f"{tone_override}\n\n"
+            + base_system
+        )
+
     client = OpenAI()
     with CostTracker(
         agent_run_store,
@@ -228,7 +247,7 @@ def generate_cover_letter(
             resp = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system_prompt_override or COVER_LETTER_SYSTEM},
+                    {"role": "system", "content": base_system},
                     {"role": "user", "content": user},
                 ],
                 max_completion_tokens=4000,
@@ -237,7 +256,7 @@ def generate_cover_letter(
             resp = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system_prompt_override or COVER_LETTER_SYSTEM},
+                    {"role": "system", "content": base_system},
                     {"role": "user", "content": user},
                 ],
                 temperature=0.3,
