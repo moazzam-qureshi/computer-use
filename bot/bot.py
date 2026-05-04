@@ -28,6 +28,22 @@ async def run_bot(settings: Settings, db: Database, on_ready):
         print(f"Synced {len(synced)} slash commands", flush=True)
         await on_ready_callback(bot)
 
+    @bot.event
+    async def on_message(message):
+        # Ignore self.
+        if message.author == bot.user:
+            return
+        # DM only.
+        if not isinstance(message.channel, discord.DMChannel):
+            return
+        # Only the configured operator.
+        if int(message.author.id) != settings.discord_owner_user_id:
+            return
+        from assistant.dm_handler import handle
+        await handle(message, db=db)
+        # Do NOT process commands here; slash commands run via the tree, and
+        # we have no prefix commands in this bot.
+
     from bot.commands import register_commands
     from bot.interaction_handler import register_views
     register_commands(bot, db, settings)
