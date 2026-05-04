@@ -20,6 +20,9 @@ from storage.portfolio import PortfolioStore
 from storage.agent_runs import AgentRunStore
 from storage.scrape_runs import ScrapeRunStore
 from storage.conversations import SystemConfigStore
+from storage.scan_briefs import Brief, BriefStore
+from typing import Optional
+from domain.types import Setup, FilterDsl
 from domain.humanization import Humanizer, CycleType
 from bidder.signal_pipeline import process_job_through_setups
 from bidder.draft_pipeline import draft_order
@@ -43,6 +46,7 @@ def run_one_cycle(
     scrape_runs: ScrapeRunStore,
     sysconfig: SystemConfigStore,
     on_signal,
+    brief: Optional[Brief] = None,
 ) -> None:
     if bool(sysconfig.get("bidder_paused") or False):
         print("[scan] bidder paused via system_config; skipping cycle", flush=True)
@@ -71,7 +75,25 @@ def run_one_cycle(
     time.sleep(1.0)
 
     max_jobs = 10
-    setups = setups_store.list_active()
+    if brief is not None:
+        # Briefed scan: persist a real Setup row so signals/orders FK constraints
+        # are satisfied. Status='retired' so the scheduled cycle's list_active()
+        # ignores this setup on subsequent runs.
+        ephemeral = Setup(
+            setup_id=0, name=f"brief-{brief.brief_id}", status="retired",
+            tier="normal", filter_dsl=FilterDsl(brief.filter_dsl),
+            prose_definition=brief.prose,
+            pitch_template_id=None, cover_letter_template_id=None,
+            auto_apply_enabled=False, escalation_config={},
+        )
+        new_setup_id = setups_store.create(ephemeral)
+        ephemeral.setup_id = new_setup_id
+        setups = [ephemeral]
+        # Persist the linkage so the brief-watcher can query orders by setup_id later.
+        BriefStore(setups_store._db).attach_setup(brief.brief_id, new_setup_id)
+        print(f"[scan] briefed cycle brief_id={brief.brief_id} setup_id={new_setup_id} prose={brief.prose!r}", flush=True)
+    else:
+        setups = setups_store.list_active()
 
     # Pre-click dedup: pull all titles seen in the last 14 days. If a card's
     # title matches one of these, it's a job we already extracted in a prior
@@ -220,6 +242,25 @@ def run_one_cycle(
                     print("[scan]   no setup matched", flush=True)
                     continue
                 signal, order = result
+
+                # If this cycle is brief-driven, tag the signal so downstream
+                # consumers (alerts callback, brief-watcher) can identify it.
+                if brief is not None:
+                    with signal_store._db.transaction() as conn:
+                        with conn.cursor() as cur:
+                            from psycopg.types.json import Json as _Json
+                            cur.execute(
+                                """UPDATE signals
+                                   SET market_state = market_state || %s
+                                   WHERE signal_id = %s""",
+                                (_Json({"source": "briefed_scan", "brief_id": brief.brief_id}),
+                                 signal.signal_id),
+                            )
+                    # Also reflect on the in-memory signal so on_signal sees the tag.
+                    signal.market_state = {**(signal.market_state or {}),
+                                            "source": "briefed_scan",
+                                            "brief_id": brief.brief_id}
+
                 print("[scan]   SETUP MATCHED -> drafting Doc + cover letter", flush=True)
                 order = draft_order(
                     job, order, portfolio=portfolio, order_store=order_store,
