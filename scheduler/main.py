@@ -5,7 +5,8 @@ import asyncio
 import logging
 import random
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from typing import Optional
 from dotenv import load_dotenv
 
 # Force UTF-8 on stdout/stderr. PM2 on Windows captures the child process's
@@ -91,26 +92,68 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
     bidder_state = BidderStateStore(db)
 
     first_cycle = True
+    # Inter-cycle deadline. When the loop decides "no cycle yet," it picks a
+    # target wake time and short-polls until reaching it, breaking early if a
+    # force-run is requested or the pause flag flips. Without short-polling,
+    # /bidder run-now would sit unread for up to 4 hours during the off-hours
+    # sleep window.
+    next_cycle_at: Optional[datetime] = None
 
     while True:
         now = datetime.now(timezone.utc)
 
-        # 1. Pause check. Discord /bidder pause sets the flag; we sleep on
-        #    a short interval and re-check. /bidder run-now still fires while
-        #    paused (override path) so the operator can force a cycle.
-        state = bidder_state.get()
+        # 1. Always check for force-run first. /bidder run-now should fire
+        #    within ~30s (the polling interval), regardless of pause / sleep
+        #    window state.
         force_run = bidder_state.consume_force_run()
+
+        # 2. Pause check. /bidder pause sets the flag; bidder loop short-
+        #    polls every 30s waiting for resume. Force-run breaks past pause.
+        state = bidder_state.get()
         if state.paused and not force_run:
-            await asyncio.sleep(20)
+            await asyncio.sleep(30)
             continue
 
-        # 2. Diurnal envelope. First cycle always fires immediately for fast
-        #    feedback after a (re)start. Force-run also bypasses the envelope.
-        if not first_cycle and not force_run and not humanizer.is_active_now(now):
-            interval = humanizer.sample_scan_interval(active=False)
-            await asyncio.sleep(interval)
-            continue
+        # 3. Diurnal envelope + interval gating. First cycle and force-run
+        #    bypass both. Otherwise: if we have a pending wake-time and we
+        #    haven't reached it, short-poll for 30s and re-check force-run.
+        if not first_cycle and not force_run:
+            if next_cycle_at is not None and now < next_cycle_at:
+                await asyncio.sleep(30)
+                continue
+            # Time to roll a fresh interval based on whether the envelope
+            # considers us active right now.
+            if not humanizer.is_active_now(now):
+                interval = humanizer.sample_scan_interval(active=False)
+                next_cycle_at = now + timedelta(seconds=interval)
+                print(f"[bidder] off-hours sleep, next cycle at {next_cycle_at.isoformat()}", flush=True)
+                await asyncio.sleep(30)
+                continue
+
         first_cycle = False
+        next_cycle_at = None
+
+        # 4. Chrome health check. The bidder needs a Chrome window with the
+        #    --force-renderer-accessibility flag and a matching window title
+        #    ('Upwork' / 'Google Chrome'). If the operator closed Chrome, or
+        #    Chrome crashed, or this is a fresh process where the one-shot
+        #    chrome PM2 launcher hasn't run yet, relaunch it before scanning.
+        #    Runs in a worker thread because UIA + subprocess.Popen aren't
+        #    safe to call from the asyncio event loop directly.
+        from substrate.launch_chrome import ensure_chrome_running
+        ok = await asyncio.to_thread(_with_com, ensure_chrome_running)
+        if not ok:
+            print("[bidder] Chrome is not available; skipping this cycle", flush=True)
+            bidder_state.record_cycle_finish("failed", "chrome_unavailable")
+            await channel.send(
+                f"<@{settings.discord_owner_user_id}> Chrome could not be launched. "
+                f"Tried to relaunch automatically but the window did not appear."
+                if settings.discord_owner_user_id else
+                "Chrome could not be launched. Tried to relaunch automatically but the window did not appear."
+            )
+            await asyncio.sleep(60)
+            continue
+
         bidder_state.record_cycle_start()
 
         async def on_signal(signal, order, job):
@@ -168,8 +211,12 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
                 bidder_state.record_cycle_finish("failed", repr(e)[:500])
                 await channel.send(f"Bidder cycle failed: {e!r}")
 
+        # Set the wake-time and let the top of the loop short-poll until then
+        # (so /bidder run-now or /bidder pause take effect within ~30s instead
+        # of the full inter-cycle interval).
         interval = humanizer.sample_scan_interval(active=True)
-        await asyncio.sleep(interval)
+        next_cycle_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
+        print(f"[bidder] cycle done, next scheduled at {next_cycle_at.isoformat()}", flush=True)
 
 
 async def apply_executor_loop(bot, settings: Settings, db: Database, humanizer: Humanizer):

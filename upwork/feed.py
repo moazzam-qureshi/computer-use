@@ -15,7 +15,13 @@ from substrate import act, observe
 
 
 MOST_RECENT_URL = "https://www.upwork.com/nx/find-work/most-recent"
-CHROME_WINDOW = "Google Chrome"
+# Window-title candidates we accept as "the Chrome window the bidder drives".
+# Order matters: try the more specific match first. Upwork tabs whose page has
+# loaded show titles like "Most Recent | Upwork — Google Chrome" on Windows,
+# but a freshly-launched tab during the navigate-after-Ctrl+T transition
+# briefly says just "Google Chrome" before the page renders. Either one is a
+# valid attach point.
+CHROME_WINDOW_CANDIDATES = ("Upwork", "Google Chrome")
 
 
 def refresh_feed(window_title: str) -> None:
@@ -33,10 +39,15 @@ def refresh_feed(window_title: str) -> None:
     'Upwork' are accepted foreground targets — otherwise step 2 (Ctrl+T)
     fails focus verification because the page hasn't navigated yet.
     """
-    if not act.focus_window(CHROME_WINDOW):
+    focused = False
+    for candidate in CHROME_WINDOW_CANDIDATES:
+        if act.focus_window(candidate):
+            focused = True
+            break
+    if not focused:
         raise RuntimeError(
-            f"Chrome window not found. Run: "
-            f"uv run python substrate/launch_chrome.py --profile 'Moazzam' "
+            f"Chrome window not found (tried titles {list(CHROME_WINDOW_CANDIDATES)!r}). "
+            f"Run: uv run python substrate/launch_chrome.py --profile 'Moazzam' "
             f"--url '{MOST_RECENT_URL}' --kill-existing"
         )
     act.key("ctrl+t")
