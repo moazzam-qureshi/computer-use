@@ -218,3 +218,38 @@ def test_revert_undoes_set_goal(ctx):
     revert.invoke({})  # should restore goal A as active
     g = get_goal.invoke({})
     assert g["prose"] == "goal A"
+
+
+def test_trigger_bidder_scan_sets_force_run_flag(ctx):
+    from storage.bidder_state import BidderStateStore
+    bs = BidderStateStore(ctx.db)
+    # Make sure flag starts cleared (consume any prior pending)
+    bs.consume_force_run()
+    tools = build_tools(ctx)
+    trigger = next(t for t in tools if t.name == "trigger_bidder_scan")
+    result = trigger.invoke({})
+    assert "error" not in result
+    state = bs.get()
+    assert state.force_run_requested is True
+    bs.consume_force_run()  # clean up
+
+
+def test_trigger_briefed_scan_creates_pending_brief(ctx):
+    from storage.scan_briefs import BriefStore
+    bs = BriefStore(ctx.db)
+    tools = build_tools(ctx)
+    trigger = next(t for t in tools if t.name == "trigger_briefed_scan")
+    result = trigger.invoke({
+        "prose": "TEST:python AI agent jobs $80+/hr",
+        "filter_patch": {"min_hourly": 80, "required_skills": ["python", "rag"]},
+    })
+    assert "error" not in result
+    assert "brief_id" in result
+    assert result["status"] == "pending"
+    brief = bs.get(result["brief_id"])
+    assert brief is not None
+    assert brief.status == "pending"
+    # Cleanup so the pending brief doesn't trigger the bidder once we restart it.
+    with ctx.db.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM scan_briefs WHERE brief_id=%s", (result["brief_id"],))

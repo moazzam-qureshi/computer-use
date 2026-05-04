@@ -19,6 +19,8 @@ from storage.conversations import (
 )
 from storage.connects_ledger import ConnectsLedgerStore
 from storage.goals import GoalStore, Goal
+from storage.scan_briefs import BriefStore
+from storage.bidder_state import BidderStateStore
 
 
 class FiltersPatch(BaseModel):
@@ -197,6 +199,8 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
     connects = ConnectsLedgerStore(ctx.db)
     sysconfig = SystemConfigStore(ctx.db)
     goals = GoalStore(ctx.db)
+    briefs = BriefStore(ctx.db)
+    bidder_state = BidderStateStore(ctx.db)
 
     @tool
     def list_setups() -> list[dict]:
@@ -775,6 +779,67 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool
+    def trigger_bidder_scan() -> dict:
+        """Kick the regular scheduled bidder cycle to run NOW (within ~30s),
+        bypassing the normal interval and any off-hours window. Uses the
+        operator's existing active setups; does NOT take a brief. Use this
+        when the operator wants to re-run with current configuration after
+        a change. For ad-hoc 'find me X jobs' requests, use
+        trigger_briefed_scan instead."""
+        def before():
+            return {"force_run_requested": bidder_state.get().force_run_requested}
+
+        def apply():
+            bidder_state.request_force_run()
+            return {"force_run_requested": True, "expected_within_seconds": 30}
+
+        def after():
+            return {"force_run_requested": bidder_state.get().force_run_requested}
+
+        return _audited_write(
+            ctx, tool_name="trigger_bidder_scan", arguments={},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def trigger_briefed_scan(prose: str, filter_patch: dict) -> dict:
+        """Queue a one-shot briefed scan. The bidder will pick it up async,
+        run a single ephemeral cycle against the brief, and the brief-watcher
+        will DM the operator a natural-language summary when it finishes.
+
+        prose: a sentence describing what we're hunting for (will be used
+               as the synthetic setup's prose_definition, fed to the LLM
+               relevance check).
+        filter_patch: dict with the same keys update_setup_filters accepts
+                      (min_budget, required_skills, etc.). Converted to a
+                      filter_dsl spec via the same _patch_to_filter_rules
+                      helper used elsewhere."""
+        if not prose or not prose.strip():
+            return {"error": "validation: prose is required"}
+        try:
+            patch_obj = FiltersPatch(**filter_patch)
+        except ValidationError as e:
+            return {"error": f"validation: {e}"}
+        rules = _patch_to_filter_rules(patch_obj)
+        filter_dsl = {"all_of": rules} if rules else {"all_of": []}
+
+        def apply():
+            brief_id = briefs.request(
+                prose=prose.strip(),
+                filter_dsl=filter_dsl,
+                requested_by_conversation_id=ctx.conversation_id,
+            )
+            return {"brief_id": brief_id, "status": "pending",
+                    "expected_within_seconds": 30}
+
+        return _audited_write(
+            ctx, tool_name="trigger_briefed_scan",
+            arguments={"prose": prose, "filter_patch": filter_patch},
+            capture_before=lambda: None, apply_mutation=apply,
+            capture_after=lambda: None,
+        )
+
+    @tool
     def revert_last_change() -> dict:
         """Revert the most recent write tool call in this conversation by
         applying its before_state. If the most recent entry was itself a
@@ -830,6 +895,7 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         pause_bidder, resume_bidder,
         update_pitch_tone,
         set_goal, clear_goal,
+        trigger_bidder_scan, trigger_briefed_scan,
         revert_last_change,
     ]
 
@@ -893,6 +959,10 @@ def _apply_revert(ctx: ToolContext, tool_name: str, arguments: dict, before_stat
         sysconfig.set("bidder_paused", before_state["bidder_paused"])
     elif tool_name == "create_setup":
         # before_state is None for create; nothing to invert.
+        pass
+    elif tool_name in ("trigger_bidder_scan", "trigger_briefed_scan"):
+        # No meaningful inverse; you cannot un-scan. Defensive no-op so
+        # revert_last_change does not error if these are the most recent action.
         pass
     elif tool_name == "set_goal":
         # before_state is either None (no prior goal) or the previous goal dict.
