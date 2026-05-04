@@ -105,3 +105,28 @@ class JobStore:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM jobs WHERE job_id = %s", (job_id,))
                 return cur.fetchone() is not None
+
+    def known_titles_recent(self, days: int = 14) -> set[str]:
+        """Return titles seen in the last N days, lower-cased.
+
+        Used by the scan loop as a cheap pre-click dedup so we don't open
+        the panel for a job we already extracted in a prior cycle. URL-based
+        dedup (is_known) is more accurate but requires the panel walk to
+        get the URL; this is the cheap pre-filter for cards still in the
+        feed across cycles.
+
+        Title collisions across truly distinct jobs are rare on Upwork's
+        Most Recent feed within a 14-day window, but possible. The cost of
+        a false-positive skip is low (we'd miss bidding on the colliding
+        job for one cycle) and the saved overhead is large (~30s of panel
+        walk per skipped card).
+        """
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT lower(title) FROM jobs WHERE scraped_first_at >= %s",
+                    (cutoff,),
+                )
+                return {row[0] for row in cur.fetchall() if row[0]}

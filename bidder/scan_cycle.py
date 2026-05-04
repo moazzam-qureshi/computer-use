@@ -68,6 +68,14 @@ def run_one_cycle(
     max_jobs = 10
     setups = setups_store.list_active()
 
+    # Pre-click dedup: pull all titles seen in the last 14 days. If a card's
+    # title matches one of these, it's a job we already extracted in a prior
+    # cycle, so skip it WITHOUT opening the panel. Saves ~30s of panel-walk
+    # overhead per skipped card and keeps the cycle focused on truly new
+    # listings instead of re-scanning the same top-of-feed jobs every cycle.
+    known_titles_lower = job_store.known_titles_recent(days=14)
+    print(f"[scan] dedup index loaded: {len(known_titles_lower)} known titles from last 14 days", flush=True)
+
     seen_titles: set[str] = set()
     seen, new, signaled = 0, 0, 0
     no_progress_iters = 0
@@ -107,6 +115,30 @@ def run_one_cycle(
             mid_y = (title_el.bounds[1] + title_el.bounds[3]) // 2
             if mid_y > 1100:
                 print(f"[scan]   skip-for-now: '{title[:60]}' y={mid_y} below safe click zone; will retry after scroll", flush=True)
+                continue
+
+            # PRE-CLICK DEDUP. Two layers, URL first (perfect), then title
+            # fallback (95%+ accurate). Either match means we already have
+            # this job in the DB, so skip without opening the panel.
+            #
+            # Layer 1: read the title hyperlink's URL via UIA's ValuePattern
+            # (already populated on the Element). Some Chrome accessibility
+            # implementations expose the href; some leave it empty. When
+            # present, this is a perfect identifier.
+            link_value = (getattr(title_el, "value", None) or "").strip()
+            preclick_job_id = _job_id_from_url(link_value) if "~" in link_value else ""
+            if preclick_job_id and preclick_job_id != link_value and job_store.is_known(preclick_job_id):
+                seen_titles.add(title)
+                print(f"[scan]   pre-click skip (URL match): '{title[:60]}' job_id={preclick_job_id}", flush=True)
+                continue
+
+            # Layer 2: title-based dedup against the recent-jobs index. Title
+            # collisions across distinct posts within 14d are rare on
+            # 'Most Recent' so the false-positive cost is acceptable for the
+            # ~30s of panel walk it saves.
+            if title.strip().lower() in known_titles_lower:
+                seen_titles.add(title)
+                print(f"[scan]   pre-click skip (title match): '{title[:60]}'", flush=True)
                 continue
 
             seen_titles.add(title)
@@ -168,6 +200,11 @@ def run_one_cycle(
                     extracted.title = title
                 job = _to_job(job_id, url, extracted)
                 job_store.upsert(job, source="feed", raw_panel={})
+                # Add to in-memory dedup set so subsequent cards in this
+                # cycle with the same title (rare but possible if Upwork
+                # reorders the feed mid-scan) skip without re-extracting.
+                if job.title:
+                    known_titles_lower.add(job.title.strip().lower())
                 print(f"[scan]   persisted job: title={job.title[:60]!r} budget={job.budget_kind}/{job.budget_min_usd}-{job.budget_max_usd} skills={len(job.skills)} posted={job.posted_text!r}", flush=True)
 
                 print("[scan]   running setup match + enrichment + relevance", flush=True)
