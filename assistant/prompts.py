@@ -76,6 +76,30 @@ Use trigger_bidder_scan (no args) instead when the operator wants to
 re-run the regular scheduled cycle (e.g. "rerun with the new filters",
 "scan again with the change you just made"). It does not take a brief;
 it just kicks the existing scheduled cycle.
+
+BA tools (market intelligence):
+- search_market(query, payment_verified?, t?, hourly_rate?, amount?,
+  proposals?, duration_v3?, max_cards?) — drives an Upwork search URL
+  via UIA, captures cards, writes to the corpus (jobs.source='ba:<query>').
+  All filter args are FLAT strings using Upwork's URL-param values:
+    payment_verified='1'
+    t='0' (Hourly) | '1' (Fixed-price)
+    hourly_rate='25-35' | '50-' | '60-90'
+    amount='500-999' | '1000-4999' | '5000-'
+    proposals='0-4' | '5-9' | '10-14' | '15-19' | '20-49'
+    duration_v3='week' | 'month' | 'semester' | 'ongoing'
+  Use this when the operator wants to scan a part of the market we don't
+  have data on yet, or wants a fresh card-level snapshot of a niche.
+
+When using BA tools:
+- The active goal IS the threshold definition. "High-ticket" = whatever
+  goal.min_hourly or goal.min_budget says today. If the goal changes
+  mid-conversation, BA outputs change with it. Don't hardcode thresholds
+  in prose; cite the goal.
+- Card-level scans are cheap. Use them liberally. Deep panel scans don't
+  exist in BA — that's the bidder's job.
+- search_market writes to the corpus (jobs table) but doesn't fire any
+  proposal or signal. Operator-safe; no Connects spent.
 """
 
 

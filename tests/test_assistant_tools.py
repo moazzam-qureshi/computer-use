@@ -334,3 +334,101 @@ def test_trigger_briefed_scan_accepts_omitted_filter_patch(ctx):
     with ctx.db.transaction() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM scan_briefs WHERE brief_id=%s", (result["brief_id"],))
+
+
+# ---- BA tools (Task 3) ----
+
+def test_search_market_registered_and_validates(ctx):
+    """The tool exists, validates filter args, surfaces errors as dicts."""
+    tools = build_tools(ctx)
+    sm = next(t for t in tools if t.name == "search_market")
+    # Empty query → validation error
+    result = sm.invoke({"query": ""})
+    assert "error" in result
+    assert "query is required" in result["error"]
+
+
+def test_search_market_writes_corpus(ctx, monkeypatch):
+    """End-to-end: tool invocation writes corpus rows via search_and_ingest.
+    The substrate-level search() is patched to avoid real Chrome use; the
+    storage path runs against the live test DB.
+    """
+    from datetime import datetime, timezone
+    from upwork.search_driver import CardResult
+    import upwork.search_driver as search_driver_mod
+
+    fake_cards = [
+        CardResult(
+            title=f"TEST-BA: hourly RAG eval pipeline {datetime.now().timestamp()}",
+            snippet="ba tool integration test",
+            budget_kind="hourly",
+            budget_min_usd=60.0, budget_max_usd=90.0,
+            budget_text="Hourly: $60.00 - $90.00",
+            posted_text="11 minutes ago",
+            posted_at=datetime.now(timezone.utc),
+            skills=["RAG", "Python"],
+            client_country="United States",
+            payment_verified=True,
+        ),
+        CardResult(
+            title=f"TEST-BA: fixed voice agent {datetime.now().timestamp()}",
+            budget_kind="fixed",
+            budget_min_usd=5000.0, budget_max_usd=5000.0,
+            budget_text="Fixed-price",
+            posted_text="3 hours ago",
+            posted_at=datetime.now(timezone.utc),
+            skills=["Voice AI"],
+        ),
+    ]
+
+    def fake_search(query, filters, max_cards=30, window_title="Upwork"):
+        return list(fake_cards)
+
+    monkeypatch.setattr(search_driver_mod, "search", fake_search)
+
+    tools = build_tools(ctx)
+    sm = next(t for t in tools if t.name == "search_market")
+    result = sm.invoke({
+        "query": "RAG engineer",
+        "payment_verified": "1",
+        "hourly_rate": "60-",
+    })
+
+    assert "error" not in result, result
+    assert result["scanned"] == 2
+    assert result["inserted"] == 2
+    assert result["source"].startswith("ba:RAG engineer|")
+    assert "hourly_rate=60-" in result["source"]
+    assert "payment_verified=1" in result["source"]
+    assert len(result["sample"]) == 2
+
+    # Re-run same query: idempotent — no new rows.
+    result2 = sm.invoke({
+        "query": "RAG engineer",
+        "payment_verified": "1",
+        "hourly_rate": "60-",
+    })
+    assert result2["inserted"] == 0
+    assert result2["updated_existing"] == 2
+
+    # Cleanup the test rows so we don't pollute the live DB.
+    titles = [c.title for c in fake_cards]
+    with ctx.db.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM jobs WHERE title = ANY(%s)", (titles,))
+
+
+def test_search_market_filter_assembly():
+    """_build_filters drops Nones and produces clean dicts."""
+    from assistant.ba_tools import _build_filters
+    out = _build_filters(
+        payment_verified="1", t="0", hourly_rate=None,
+        amount=None, proposals=None, duration_v3="ongoing",
+    )
+    assert out == {"payment_verified": "1", "t": "0", "duration_v3": "ongoing"}
+
+    empty = _build_filters(
+        payment_verified=None, t=None, hourly_rate=None,
+        amount=None, proposals=None, duration_v3=None,
+    )
+    assert empty == {}

@@ -1034,6 +1034,9 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         )
         return {"reverted_tool": tool_name, "restored_state": before_state}
 
+    from assistant.ba_tools import build_ba_tools
+    ba_tools = build_ba_tools(ctx)
+
     return [
         list_setups, get_setup, list_orders, get_job,
         recent_activity, connects_status, list_portfolio_items, search_jobs,
@@ -1054,6 +1057,7 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         update_pitch_tone,
         set_goal, clear_goal,
         trigger_bidder_scan, trigger_briefed_scan,
+        *ba_tools,
         revert_last_change,
     ]
 
