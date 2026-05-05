@@ -780,26 +780,22 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
 
     @tool
     def trigger_bidder_scan() -> dict:
-        """Kick the regular scheduled bidder cycle to run NOW (within ~30s),
-        bypassing the normal interval and any off-hours window. Uses the
-        operator's existing active setups; does NOT take a brief. Use this
-        when the operator wants to re-run with current configuration after
-        a change. For ad-hoc 'find me X jobs' requests, use
-        trigger_briefed_scan instead."""
-        def before():
-            return {"force_run_requested": bidder_state.get().force_run_requested}
-
-        def apply():
-            bidder_state.request_force_run()
-            return {"force_run_requested": True, "expected_within_seconds": 30}
-
-        def after():
-            return {"force_run_requested": bidder_state.get().force_run_requested}
-
-        return _audited_write(
-            ctx, tool_name="trigger_bidder_scan", arguments={},
-            capture_before=before, apply_mutation=apply, capture_after=after,
-        )
+        """Status check on the goal-driven bidder. Phase 2.B: detection runs
+        every 60s automatically against the operator's active goal, so a
+        manual 'force run' is a no-op. This returns the most recent cycle
+        status instead. For ad-hoc 'find me X jobs' requests, use
+        trigger_briefed_scan."""
+        s = bidder_state.get()
+        return {
+            "info": (
+                "Detection runs every 60s against the active goal — no force-run "
+                "needed. For ad-hoc hunts, use trigger_briefed_scan."
+            ),
+            "last_cycle_started_at": s.last_cycle_started_at.isoformat() if s.last_cycle_started_at else None,
+            "last_cycle_finished_at": s.last_cycle_finished_at.isoformat() if s.last_cycle_finished_at else None,
+            "last_cycle_status": s.last_cycle_status,
+            "paused": s.paused,
+        }
 
     @tool
     def trigger_briefed_scan(prose: str, filter_patch: dict) -> dict:

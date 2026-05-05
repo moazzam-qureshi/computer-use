@@ -1,6 +1,9 @@
 # Phase 2.B — Sniper Bidder (Vision Triage + Goal-Driven Detection)
 
-**Status:** Approved 2026-05-04
+**Status:** SUPERSEDED 2026-05-05 by [2026-05-05-sniper-bidder-uia-text-triage-design.md](2026-05-05-sniper-bidder-uia-text-triage-design.md)
+**Reason:** Empirical diagnostics (see handoff `docs/superpowers/handoffs/2026-05-05-phase2b-sniper-bidder-handoff.md`) showed that at 33% zoom the UIA tree exposes all 9-10 feed cards in a single walk with full structured data (title, posted, budget, description preview, skills, country, payment-verified, total-spent). Vision-on-screenshots is unnecessary; text-LLM triage on UIA-extracted FeedCard records is faster (~30s vs ~3-5s vision but no `Down×21 ×2` dance), cheaper (~$0.001 vs ~$2.50/day), and structurally simpler. The new spec also corrects the URL-extraction assumption: Chrome does not expose hyperlink hrefs via UIA, so URL capture must use the existing click + Copy-to-clipboard panel mechanism.
+
+**Original status:** Approved 2026-05-04
 **Branch baseline:** `phase1-foundation`
 **Implementation target:** new `bidder/detection_loop.py` + `bidder/processing_loop.py`, decommissions `bidder_loop` and `run_one_cycle`'s setup-iteration logic
 

@@ -75,3 +75,24 @@ class GoalStore:
                     UPDATE goals SET is_active = false, deactivated_at = now()
                     WHERE is_active = true
                 """)
+
+    def get_by_id(self, goal_id: int) -> Optional[Goal]:
+        """Look up a goal regardless of is_active. Used by Phase 2.B
+        processing to honor the goal that was active at detection time."""
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT goal_id, prose, target_metric, target_value, horizon,
+                           min_hourly, min_budget, preferred_country, notes,
+                           is_active, created_at, deactivated_at
+                    FROM goals WHERE goal_id = %s
+                """, (goal_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return Goal(
+                    goal_id=row[0], prose=row[1], target_metric=row[2],
+                    target_value=row[3], horizon=row[4], min_hourly=row[5],
+                    min_budget=row[6], preferred_country=row[7], notes=row[8],
+                    is_active=row[9], created_at=row[10], deactivated_at=row[11],
+                )

@@ -52,6 +52,7 @@ from storage.conversations import SystemConfigStore
 from storage.scan_briefs import BriefStore
 from domain.humanization import Humanizer, default_envelope
 from bidder.scan_cycle import run_one_cycle
+from bidder.sniper_loop import run_sniper_loop
 from bidder.apply_executor import execute_approved_order
 from bot.bot import build_bot
 from bot.commands import register_commands
@@ -341,8 +342,8 @@ async def main():
         await handle(message, db=db)
 
     async def setup_hook():
-        print("setup_hook fired; starting bidder + apply_executor + brief_watcher loops", flush=True)
-        bot.loop.create_task(bidder_loop(bot, settings, db, humanizer))
+        print("setup_hook fired; starting sniper + apply_executor + brief_watcher loops", flush=True)
+        bot.loop.create_task(run_sniper_loop(bot, settings, db, humanizer, ui_lock))
         bot.loop.create_task(apply_executor_loop(bot, settings, db, humanizer))
         from assistant.brief_watcher import run_brief_watcher
         bot.loop.create_task(run_brief_watcher(db, bot, settings))

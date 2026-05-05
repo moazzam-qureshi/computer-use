@@ -220,18 +220,23 @@ def test_revert_undoes_set_goal(ctx):
     assert g["prose"] == "goal A"
 
 
-def test_trigger_bidder_scan_sets_force_run_flag(ctx):
+def test_trigger_bidder_scan_returns_status_payload(ctx):
+    """Phase 2.B: detection runs every 60s automatically, so trigger_bidder_scan
+    is a friendly no-op that returns the most recent cycle's status. It must
+    NOT set force_run_requested anymore (Phase 2.B doesn't consume that flag)."""
     from storage.bidder_state import BidderStateStore
     bs = BidderStateStore(ctx.db)
-    # Make sure flag starts cleared (consume any prior pending)
-    bs.consume_force_run()
+    bs.consume_force_run()  # ensure we start with the flag cleared
     tools = build_tools(ctx)
     trigger = next(t for t in tools if t.name == "trigger_bidder_scan")
     result = trigger.invoke({})
     assert "error" not in result
+    assert "info" in result
+    assert "60s" in result["info"]
+    # Critical: must NOT set force_run_requested. The Phase 2.B detection
+    # loop ignores this flag entirely; setting it would silently leak.
     state = bs.get()
-    assert state.force_run_requested is True
-    bs.consume_force_run()  # clean up
+    assert state.force_run_requested is False
 
 
 def test_trigger_briefed_scan_creates_pending_brief(ctx):
