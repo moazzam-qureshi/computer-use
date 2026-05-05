@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from domain.types import Job, Setup, MatchResult, FilterDsl
@@ -35,6 +36,14 @@ def _eval_rule(rule: dict, job: Job) -> tuple[str, bool]:
         if not job.description:
             return key, False
         return key, bool(re.search(val, job.description, re.I))
+
+    if key == "posted_within_minutes":
+        # Hard freshness gate: job.posted_at must be set AND within val minutes.
+        # Unknown posted_at fails closed — operator asked for fresh-only.
+        if job.posted_at is None:
+            return key, False
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=int(val))
+        return key, (job.posted_at >= cutoff)
 
     raise ValueError(f"Unknown rule key: {key!r}")
 

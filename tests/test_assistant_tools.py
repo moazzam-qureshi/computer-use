@@ -258,3 +258,31 @@ def test_trigger_briefed_scan_creates_pending_brief(ctx):
     with ctx.db.transaction() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM scan_briefs WHERE brief_id=%s", (result["brief_id"],))
+
+
+def test_update_setup_filters_accepts_max_post_age_minutes(ctx, setup_id):
+    tools = build_tools(ctx)
+    update = next(t for t in tools if t.name == "update_setup_filters")
+    result = update.invoke({
+        "setup_id": setup_id,
+        "patch": {"max_post_age_minutes": 30},
+    })
+    assert "error" not in result
+    rules = result["filter_dsl"]["all_of"]
+    assert {"posted_within_minutes": 30} in rules
+
+
+def test_trigger_briefed_scan_accepts_omitted_filter_patch(ctx):
+    from storage.scan_briefs import BriefStore
+    bs = BriefStore(ctx.db)
+    tools = build_tools(ctx)
+    trigger = next(t for t in tools if t.name == "trigger_briefed_scan")
+    result = trigger.invoke({"prose": "TEST:LLM-only brief, no hard filters"})
+    assert "error" not in result
+    assert "brief_id" in result
+    brief = bs.get(result["brief_id"])
+    assert brief is not None
+    assert brief.filter_dsl == {"all_of": []}
+    with ctx.db.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM scan_briefs WHERE brief_id=%s", (result["brief_id"],))

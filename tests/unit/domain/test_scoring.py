@@ -1,4 +1,6 @@
 """Filter-DSL evaluation: given a Job and a Setup, decide if it matches and why."""
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from domain.types import Job, Setup, FilterDsl
 from domain.scoring import score_job_against_setup, MatchResult
@@ -71,3 +73,27 @@ def test_no_match_returns_match_false_with_reason():
     result = score_job_against_setup(_job(), setup)
     assert result.matched is False
     assert "skill_in" in result.unmet_rules
+
+
+def test_posted_within_minutes_recent_passes():
+    setup = _setup({"all_of": [{"posted_within_minutes": 30}]})
+    fresh = _job(posted_at=datetime.now(timezone.utc) - timedelta(minutes=10))
+    result = score_job_against_setup(fresh, setup)
+    assert result.matched is True
+    assert "posted_within_minutes" in result.matched_rules
+
+
+def test_posted_within_minutes_stale_excluded():
+    setup = _setup({"all_of": [{"posted_within_minutes": 30}]})
+    stale = _job(posted_at=datetime.now(timezone.utc) - timedelta(minutes=90))
+    result = score_job_against_setup(stale, setup)
+    assert result.matched is False
+    assert "posted_within_minutes" in result.unmet_rules
+
+
+def test_posted_within_minutes_unknown_posted_at_fails_closed():
+    # Operator asked for fresh-only; jobs whose posted_at couldn't be parsed
+    # must be excluded rather than slipping through.
+    setup = _setup({"all_of": [{"posted_within_minutes": 30}]})
+    unknown = _job(posted_at=None)
+    assert score_job_against_setup(unknown, setup).matched is False

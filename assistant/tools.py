@@ -35,6 +35,7 @@ class FiltersPatch(BaseModel):
     min_client_spend: Optional[float] = None
     payment_verified_required: Optional[bool] = None
     excluded_durations: Optional[list[str]] = None
+    max_post_age_minutes: Optional[int] = None
 
 
 def _patch_to_filter_rules(patch: FiltersPatch) -> list[dict]:
@@ -60,6 +61,8 @@ def _patch_to_filter_rules(patch: FiltersPatch) -> list[dict]:
         rules.append({"min_client_spend": patch.min_client_spend})
     if patch.excluded_durations:
         rules.append({"excluded_durations": patch.excluded_durations})
+    if patch.max_post_age_minutes is not None:
+        rules.append({"posted_within_minutes": int(patch.max_post_age_minutes)})
     return rules
 
 
@@ -415,7 +418,9 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         """Merge filter rules into a setup. patch keys: min_budget, max_budget,
         exclude_fixed_under, min_hourly, max_hourly, required_skills,
         excluded_skills, min_client_spend, payment_verified_required,
-        excluded_durations. Existing rules with the same key are replaced."""
+        excluded_durations, max_post_age_minutes (hard-exclude jobs whose
+        posted_at is older than N minutes). Existing rules with the same key
+        are replaced."""
         try:
             patch_obj = FiltersPatch(**patch)
         except ValidationError as e:
@@ -798,7 +803,7 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         }
 
     @tool
-    def trigger_briefed_scan(prose: str, filter_patch: dict) -> dict:
+    def trigger_briefed_scan(prose: str, filter_patch: Optional[dict] = None) -> dict:
         """Queue a one-shot briefed scan. The bidder will pick it up async,
         run a single ephemeral cycle against the brief, and the brief-watcher
         will DM the operator a natural-language summary when it finishes.
@@ -806,14 +811,14 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         prose: a sentence describing what we're hunting for (will be used
                as the synthetic setup's prose_definition, fed to the LLM
                relevance check).
-        filter_patch: dict with the same keys update_setup_filters accepts
-                      (min_budget, required_skills, etc.). Converted to a
-                      filter_dsl spec via the same _patch_to_filter_rules
-                      helper used elsewhere."""
+        filter_patch: optional dict with the same keys update_setup_filters
+                      accepts (min_budget, required_skills,
+                      max_post_age_minutes, etc.). Omit or pass {} for an
+                      LLM-only brief with no hard filters."""
         if not prose or not prose.strip():
             return {"error": "validation: prose is required"}
         try:
-            patch_obj = FiltersPatch(**filter_patch)
+            patch_obj = FiltersPatch(**(filter_patch or {}))
         except ValidationError as e:
             return {"error": f"validation: {e}"}
         rules = _patch_to_filter_rules(patch_obj)
@@ -830,7 +835,7 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
 
         return _audited_write(
             ctx, tool_name="trigger_briefed_scan",
-            arguments={"prose": prose, "filter_patch": filter_patch},
+            arguments={"prose": prose, "filter_patch": filter_patch or {}},
             capture_before=lambda: None, apply_mutation=apply,
             capture_after=lambda: None,
         )
