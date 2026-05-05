@@ -272,6 +272,54 @@ def test_update_setup_filters_accepts_max_post_age_minutes(ctx, setup_id):
     assert {"posted_within_minutes": 30} in rules
 
 
+def test_set_setup_max_post_age_minutes_flat_call(ctx, setup_id):
+    """The flat single-purpose tool the agent should use. No nested patch."""
+    tools = build_tools(ctx)
+    setter = next(t for t in tools if t.name == "set_setup_max_post_age_minutes")
+    result = setter.invoke({"setup_id": setup_id, "minutes": 30})
+    assert "error" not in result
+    rules = result["filter_dsl"]["all_of"]
+    assert {"posted_within_minutes": 30} in rules
+
+
+def test_set_setup_min_hourly_flat_call(ctx, setup_id):
+    tools = build_tools(ctx)
+    setter = next(t for t in tools if t.name == "set_setup_min_hourly")
+    result = setter.invoke({"setup_id": setup_id, "amount": 75})
+    assert "error" not in result
+    rules = result["filter_dsl"]["all_of"]
+    assert {"min_hourly": 75.0} in rules
+
+
+def test_set_setup_required_skills_flat_call(ctx, setup_id):
+    tools = build_tools(ctx)
+    setter = next(t for t in tools if t.name == "set_setup_required_skills")
+    result = setter.invoke({"setup_id": setup_id, "skills": ["python", "rag"]})
+    assert "error" not in result
+    rules = result["filter_dsl"]["all_of"]
+    assert {"skill_in": ["python", "rag"]} in rules
+
+
+def test_clear_setup_filter_removes_rule(ctx, setup_id):
+    tools = build_tools(ctx)
+    setter = next(t for t in tools if t.name == "set_setup_max_post_age_minutes")
+    setter.invoke({"setup_id": setup_id, "minutes": 30})
+    clear = next(t for t in tools if t.name == "clear_setup_filter")
+    result = clear.invoke({"setup_id": setup_id, "rule_key": "posted_within_minutes"})
+    assert "error" not in result
+    assert result["removed"] is True
+    rules = result["filter_dsl"].get("all_of", [])
+    assert all("posted_within_minutes" not in r for r in rules)
+
+
+def test_clear_setup_filter_no_op_when_absent(ctx, setup_id):
+    tools = build_tools(ctx)
+    clear = next(t for t in tools if t.name == "clear_setup_filter")
+    result = clear.invoke({"setup_id": setup_id, "rule_key": "skill_in"})
+    assert "error" not in result
+    assert result["removed"] is False
+
+
 def test_trigger_briefed_scan_accepts_omitted_filter_patch(ctx):
     from storage.scan_briefs import BriefStore
     bs = BriefStore(ctx.db)

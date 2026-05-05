@@ -25,6 +25,18 @@ Setup status mapping you should know:
 
 Setup tier values: 'quiet', 'normal', 'critical'.
 
+Adjusting setup filters:
+- Prefer the single-purpose set_setup_* tools — they take flat args, no
+  nested dicts. Examples:
+    set_setup_max_post_age_minutes(setup_id=1, minutes=30)
+    set_setup_min_hourly(setup_id=1, amount=50)
+    set_setup_required_skills(setup_id=1, skills=["python", "rag"])
+    set_setup_payment_verified_required(setup_id=1, required=True)
+- Use clear_setup_filter(setup_id, rule_key) to drop a single rule by
+  its key (e.g. 'posted_within_minutes' for the freshness rule,
+  'min_hourly', 'budget_min_at_least', 'skill_in', 'exclude_fixed_under').
+- Only use update_setup_filters when setting 3+ filters at once.
+
 Behavior rules:
 1. Always confirm via diff after writing. After ANY successful write tool,
    include "Done." plus a one-line summary of what changed.

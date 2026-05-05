@@ -413,14 +413,11 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
 
     # ---- write tools ----
 
-    @tool
-    def update_setup_filters(setup_id: int, patch: dict) -> dict:
-        """Merge filter rules into a setup. patch keys: min_budget, max_budget,
-        exclude_fixed_under, min_hourly, max_hourly, required_skills,
-        excluded_skills, min_client_spend, payment_verified_required,
-        excluded_durations, max_post_age_minutes (hard-exclude jobs whose
-        posted_at is older than N minutes). Existing rules with the same key
-        are replaced."""
+    def _apply_filter_patch(setup_id: int, patch: dict, *, audit_tool_name: str) -> dict:
+        """Shared body: validate patch dict, merge into setup.filter_dsl,
+        audit as `audit_tool_name`. Used by update_setup_filters AND the
+        granular set_setup_<key> tools below — they all funnel through
+        the same merge + audit so revert_last_change works identically."""
         try:
             patch_obj = FiltersPatch(**patch)
         except ValidationError as e:
@@ -451,8 +448,160 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
             return None if s is None else {"filter_dsl": s.filter_dsl.spec}
 
         return _audited_write(
-            ctx, tool_name="update_setup_filters",
+            ctx, tool_name=audit_tool_name,
             arguments={"setup_id": setup_id, "patch": patch},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def update_setup_filters(setup_id: int, patch: dict) -> dict:
+        """Batch-merge filter rules into a setup. Prefer the single-purpose
+        set_setup_* tools (set_setup_min_budget, set_setup_max_post_age_minutes,
+        etc.) — use this only when you need to set 3+ filters at once.
+
+        patch keys: min_budget, max_budget, exclude_fixed_under, min_hourly,
+        max_hourly, required_skills, excluded_skills, min_client_spend,
+        payment_verified_required, excluded_durations, max_post_age_minutes.
+        Existing rules with the same key are replaced."""
+        return _apply_filter_patch(setup_id, patch, audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_min_budget(setup_id: int, amount: float) -> dict:
+        """Set the minimum budget filter (USD) on a setup. Replaces any
+        existing min-budget rule. Jobs below this are hard-excluded."""
+        return _apply_filter_patch(setup_id, {"min_budget": amount},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_max_budget(setup_id: int, amount: float) -> dict:
+        """Set the maximum budget filter (USD) on a setup. Replaces any
+        existing max-budget rule."""
+        return _apply_filter_patch(setup_id, {"max_budget": amount},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_min_hourly(setup_id: int, amount: float) -> dict:
+        """Set the minimum hourly rate filter (USD/hr) on a setup. Replaces
+        any existing min-hourly rule."""
+        return _apply_filter_patch(setup_id, {"min_hourly": amount},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_max_hourly(setup_id: int, amount: float) -> dict:
+        """Set the maximum hourly rate filter (USD/hr) on a setup."""
+        return _apply_filter_patch(setup_id, {"max_hourly": amount},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_exclude_fixed_under(setup_id: int, amount: float) -> dict:
+        """Hard-exclude fixed-price jobs whose budget_max < amount (USD).
+        Hourly jobs are unaffected."""
+        return _apply_filter_patch(setup_id, {"exclude_fixed_under": amount},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_required_skills(setup_id: int, skills: List[str]) -> dict:
+        """Set the required-skills filter on a setup. Replaces any existing
+        list. A job matches if it has at least one of these skills (case-
+        insensitive)."""
+        return _apply_filter_patch(setup_id, {"required_skills": skills},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_excluded_skills(setup_id: int, skills: List[str]) -> dict:
+        """Set the excluded-skills filter on a setup. Replaces any existing
+        list. Jobs with any of these skills are filtered out."""
+        return _apply_filter_patch(setup_id, {"excluded_skills": skills},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_min_client_spend(setup_id: int, amount: float) -> dict:
+        """Set the minimum total-client-spend filter (USD) on a setup."""
+        return _apply_filter_patch(setup_id, {"min_client_spend": amount},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_payment_verified_required(setup_id: int, required: bool) -> dict:
+        """Toggle whether a setup requires the client's payment method to
+        be verified. True = exclude unverified clients."""
+        return _apply_filter_patch(setup_id, {"payment_verified_required": required},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_excluded_durations(setup_id: int, durations: List[str]) -> dict:
+        """Set the excluded-durations filter (e.g. ['less than 1 month',
+        'less than 1 week']). Jobs whose duration matches any entry are
+        filtered out."""
+        return _apply_filter_patch(setup_id, {"excluded_durations": durations},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def set_setup_max_post_age_minutes(setup_id: int, minutes: int) -> dict:
+        """Hard-exclude jobs whose posted_at is older than `minutes` from
+        now. Jobs whose posted_at couldn't be parsed are also excluded
+        (fail-closed). Replaces any existing freshness rule on this setup."""
+        return _apply_filter_patch(setup_id, {"max_post_age_minutes": minutes},
+                                   audit_tool_name="update_setup_filters")
+
+    @tool
+    def clear_setup_filter(setup_id: int, rule_key: str) -> dict:
+        """Remove a single filter rule from a setup by its rule key
+        (e.g. 'posted_within_minutes', 'budget_min_at_least', 'skill_in',
+        'min_hourly', 'exclude_fixed_under'). Use list_setups or get_setup
+        to see the current rule keys on a setup."""
+        def before():
+            s = setups.get(setup_id)
+            return None if s is None else {"filter_dsl": s.filter_dsl.spec}
+
+        def apply():
+            s = setups.get(setup_id)
+            if s is None:
+                raise ValueError(f"setup {setup_id} not found")
+            spec = s.filter_dsl.spec or {}
+            if "all_of" in spec:
+                old = spec["all_of"]
+                container = "all_of"
+            elif "any_of" in spec:
+                old = spec["any_of"]
+                container = "any_of"
+            else:
+                # single-rule spec; if its key matches, drop it entirely.
+                if isinstance(spec, dict) and rule_key in spec:
+                    new_spec = {"all_of": []}
+                else:
+                    return {"setup_id": setup_id, "removed": False,
+                            "filter_dsl": spec}
+                with ctx.db.transaction() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE setups SET filter_dsl = %s WHERE setup_id = %s",
+                            (Json(new_spec), setup_id),
+                        )
+                return {"setup_id": setup_id, "removed": True,
+                        "filter_dsl": new_spec}
+            kept = [r for r in old
+                    if not (isinstance(r, dict) and len(r) == 1
+                            and list(r.keys())[0] == rule_key)]
+            removed = len(kept) != len(old)
+            new_spec = {container: kept}
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE setups SET filter_dsl = %s WHERE setup_id = %s",
+                        (Json(new_spec), setup_id),
+                    )
+            return {"setup_id": setup_id, "removed": removed,
+                    "filter_dsl": new_spec}
+
+        def after():
+            s = setups.get(setup_id)
+            return None if s is None else {"filter_dsl": s.filter_dsl.spec}
+
+        # Audit under update_setup_filters so revert_last_change restores
+        # the entire filter_dsl snapshot (the existing revert handler).
+        return _audited_write(
+            ctx, tool_name="update_setup_filters",
+            arguments={"setup_id": setup_id, "clear_rule_key": rule_key},
             capture_before=before, apply_mutation=apply, capture_after=after,
         )
 
@@ -889,7 +1038,15 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         list_setups, get_setup, list_orders, get_job,
         recent_activity, connects_status, list_portfolio_items, search_jobs,
         get_goal,
-        update_setup_filters, add_ignored_client, remove_ignored_client,
+        update_setup_filters,
+        set_setup_min_budget, set_setup_max_budget,
+        set_setup_min_hourly, set_setup_max_hourly,
+        set_setup_exclude_fixed_under,
+        set_setup_required_skills, set_setup_excluded_skills,
+        set_setup_min_client_spend, set_setup_payment_verified_required,
+        set_setup_excluded_durations, set_setup_max_post_age_minutes,
+        clear_setup_filter,
+        add_ignored_client, remove_ignored_client,
         set_setup_tier, set_auto_apply,
         pause_setup, resume_setup, archive_setup,
         create_setup, set_connects_cap,
