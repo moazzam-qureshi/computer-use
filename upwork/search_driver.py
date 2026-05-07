@@ -156,6 +156,31 @@ def _focus_chrome() -> None:
     )
 
 
+def _wait_for_upwork_title(timeout_s: float = 30.0) -> bool:
+    """Poll Chrome's foreground window title until it contains 'Upwork'
+    (case-insensitive), or timeout. Returns True iff the title arrived.
+
+    Necessary because act.navigate triggers an async page load — the
+    title flips from 'New Tab' -> 'Loading...' -> '<page title> | Upwork'
+    on its own clock. observe(window_title='Upwork') needs the substring
+    present at the moment of the walk.
+    """
+    import uiautomation as _uia
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            for candidate in CHROME_WINDOW_CANDIDATES:
+                act.focus_window(candidate)  # bring some Chrome window forward
+            fg = _uia.GetForegroundControl()
+            name = (fg.Name or "") if fg is not None else ""
+            if "upwork" in name.lower():
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def _open_url_in_new_tab(url: str, window_title: str) -> None:
     """Force Chrome to the foreground via Ctrl+T (new tab is a synchronous
     foreground event, unlike SetActive which Windows may not honor when
@@ -171,19 +196,33 @@ def _open_url_in_new_tab(url: str, window_title: str) -> None:
     act.key("ctrl+t")
     time.sleep(0.6)
     act.navigate(url)
-    # Give the page time to render. Search results stream in; 15s is
-    # generous and matches the bidder's most-recent-feed wait.
-    time.sleep(_RESULTS_RENDER_WAIT_S)
-    # Re-verify focus AFTER hydrate. If Chrome got pushed back to
-    # background while loading, raise loudly rather than send keystrokes
-    # to whatever app stole focus.
+    # Wait for the page to actually be on Upwork — title contains 'Upwork'.
+    # Polling is more robust than a fixed sleep because real-world load
+    # times vary (cold cache, slow network, login redirect, Cloudflare
+    # challenge, etc.).
+    if not _wait_for_upwork_title(timeout_s=_RESULTS_RENDER_WAIT_S):
+        # Title never showed Upwork. Page may have redirected to login,
+        # hit a Cloudflare challenge, or just loaded slowly. Surface
+        # the actual foreground state so caller can diagnose.
+        try:
+            import uiautomation as _uia
+            fg = _uia.GetForegroundControl()
+            fg_name = (fg.Name or "<no name>") if fg is not None else "<no fg>"
+        except Exception:
+            fg_name = "<error reading fg>"
+        raise RuntimeError(
+            f"Page did not load to Upwork within {_RESULTS_RENDER_WAIT_S}s. "
+            f"Foreground window: {fg_name!r}. URL was: {url}. "
+            "Possible causes: login expired, Cloudflare challenge, slow "
+            "network, or Chrome lost focus."
+        )
+    # Title arrived; ensure focus is solid before the caller's UIA walk.
     for candidate in CHROME_WINDOW_CANDIDATES:
         if act.focus_window(candidate):
             return
     raise RuntimeError(
-        "Chrome lost focus during page load. Try again with no other "
-        "active app stealing focus. (Or: Researcher running on a VM "
-        "where another OS-level event grabbed the foreground.)"
+        "Chrome lost focus immediately after Upwork title appeared. "
+        "Race condition with another app. Retry."
     )
 
 
