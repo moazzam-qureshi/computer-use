@@ -133,3 +133,34 @@ def configure(config: PacingConfig) -> None:
     """Replace the default pacer with one using `config`. Call once at startup."""
     global _default
     _default = Pacer(config)
+
+
+def set_max_actions_per_hour(per_hour: int) -> int:
+    """Mutate the live pacer's hourly budget without losing action history.
+
+    Called by scheduler/loops to pick up operator-requested changes from
+    system_config. Returns the value applied (clamped to >=1).
+    """
+    if per_hour < 1:
+        per_hour = 1
+    pacer = get_pacer()
+    pacer.cfg.max_actions_per_hour = int(per_hour)
+    return per_hour
+
+
+def apply_from_sysconfig(sysconfig) -> None:
+    """Read 'pacing_budget_per_hour' from system_config and apply if set.
+
+    Loops call this once per cycle (cheap — single key lookup). If the
+    operator changes the budget via the assistant tool, the next cycle
+    picks it up. If the key is unset, the existing pacer config stays.
+    """
+    raw = sysconfig.get("pacing_budget_per_hour")
+    if raw is None:
+        return
+    try:
+        per_hour = int(raw)
+        if per_hour > 0:
+            set_max_actions_per_hour(per_hour)
+    except (ValueError, TypeError):
+        pass  # malformed sysconfig value; ignore

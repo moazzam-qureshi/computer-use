@@ -627,3 +627,205 @@ def test_add_research_query_revertible(ctx):
 
     # Belt-and-suspenders cleanup in case revert didn't fire correctly
     remove.invoke({"query": test_query})
+
+
+# ---- set_pacing_budget (R-Task 10) ----
+
+def test_set_pacing_budget_writes_sysconfig(ctx):
+    from storage.conversations import SystemConfigStore
+    sysconfig = SystemConfigStore(ctx.db)
+    # Save prior value so we can restore after the test
+    prior = sysconfig.get("pacing_budget_per_hour")
+    try:
+        tools = build_tools(ctx)
+        spb = next(t for t in tools if t.name == "set_pacing_budget")
+        result = spb.invoke({"per_hour": 250})
+        assert "error" not in result
+        assert result["pacing_budget_per_hour"] == 250
+        assert sysconfig.get("pacing_budget_per_hour") == 250
+    finally:
+        # Restore for other tests / live system
+        if prior is None:
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM system_config WHERE key = 'pacing_budget_per_hour'"
+                    )
+        else:
+            sysconfig.set("pacing_budget_per_hour", prior)
+
+
+def test_set_pacing_budget_validates_positive(ctx):
+    tools = build_tools(ctx)
+    spb = next(t for t in tools if t.name == "set_pacing_budget")
+    assert "error" in spb.invoke({"per_hour": 0})
+    assert "error" in spb.invoke({"per_hour": -50})
+
+
+def test_set_pacing_budget_revertible(ctx):
+    """Setting then reverting restores the prior sysconfig state.
+
+    If pacing_budget_per_hour was unset before this test, revert deletes
+    the key entirely. If it was set, revert restores the prior value.
+    """
+    from storage.conversations import SystemConfigStore
+    sysconfig = SystemConfigStore(ctx.db)
+    prior = sysconfig.get("pacing_budget_per_hour")
+    try:
+        tools = build_tools(ctx)
+        spb = next(t for t in tools if t.name == "set_pacing_budget")
+        revert = next(t for t in tools if t.name == "revert_last_change")
+
+        spb.invoke({"per_hour": 999})
+        assert sysconfig.get("pacing_budget_per_hour") == 999
+
+        revert.invoke({})
+        # After revert: should be back to prior state
+        post_revert = sysconfig.get("pacing_budget_per_hour")
+        assert post_revert == prior
+    finally:
+        if prior is None:
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM system_config WHERE key = 'pacing_budget_per_hour'"
+                    )
+        else:
+            sysconfig.set("pacing_budget_per_hour", prior)
+
+
+# ---- BA proposers (R-Task 11) ----
+
+def test_propose_project_returns_brief(ctx, monkeypatch):
+    """Tool wraps propose_project_brief LLM call. Mock the LLM, verify
+    the returned dict carries all WHY fields."""
+    from ai.schemas import ProjectGapBrief
+    fake_brief = ProjectGapBrief(
+        title="Multi-tenant Ragas eval pipeline with LangSmith",
+        one_line_pitch="Drop-in eval harness for production RAG with audit trail.",
+        why_demand="Corpus: 14 jobs/30d name Ragas, $75/hr median, all US.",
+        why_gap="Operator's RAG platform has hybrid search but no eval.",
+        why_goal_fit="Goal min_hourly=$80; niche straddles at $75-100/hr.",
+        relevance_tags=["ragas", "langsmith"],
+    )
+    monkeypatch.setattr(
+        "ai.ba_proposer.propose_project_brief",
+        lambda *args, **kwargs: fake_brief,
+    )
+
+    tools = build_tools(ctx)
+    pp = next(t for t in tools if t.name == "propose_project")
+    result = pp.invoke({"theme": "RAG eval pipelines"})
+    assert "error" not in result
+    assert "Ragas" in result["title"]
+    assert "why_demand" in result
+    assert "why_gap" in result
+    assert "why_goal_fit" in result
+    assert "relevance_tags" in result
+
+
+def test_propose_project_rejects_empty_theme(ctx):
+    tools = build_tools(ctx)
+    pp = next(t for t in tools if t.name == "propose_project")
+    assert "error" in pp.invoke({"theme": ""})
+    assert "error" in pp.invoke({"theme": "  "})
+
+
+def test_propose_project_handles_llm_validation_failure(ctx, monkeypatch):
+    """When the LLM returns junk that doesn't pass the schema, the
+    proposer returns None and the tool surfaces an error."""
+    monkeypatch.setattr(
+        "ai.ba_proposer.propose_project_brief",
+        lambda *args, **kwargs: None,
+    )
+    tools = build_tools(ctx)
+    pp = next(t for t in tools if t.name == "propose_project")
+    result = pp.invoke({"theme": "AI"})
+    assert "error" in result
+    assert "schema" in result["error"].lower() or "WHY" in result["error"]
+
+
+def test_propose_setup_refuses_zero_backtest(ctx, monkeypatch):
+    """If the proposed filter has 0 corpus matches, the tool returns
+    an error rather than a silent zero-match proposal."""
+    from ai.schemas import SetupProposal
+    fake_setup = SetupProposal(
+        name="test-empty-setup",
+        tier="normal",
+        filter_dsl={"all_of": [{"skill_in": ["never-occurring-skill-xyz"]}]},
+        prose="A test prose definition that satisfies the schema length floor.",
+        backtest_count=0,
+        why_demand="Corpus shows N jobs in this niche per the snapshot evidence.",
+        why_gap="Operator portfolio has tangential coverage but not direct fit.",
+        why_goal_fit="Goal min_hourly aligns with the niche's typical band.",
+    )
+    monkeypatch.setattr(
+        "ai.ba_proposer.propose_setup",
+        lambda *args, **kwargs: fake_setup,
+    )
+
+    tools = build_tools(ctx)
+    ps = next(t for t in tools if t.name == "propose_setup_from_corpus")
+    result = ps.invoke({"theme": "never-occurring-skill"})
+    assert "error" in result
+    assert "0 corpus matches" in result["error"]
+    assert "proposal" in result  # we surface the proposal so operator can see what was attempted
+
+
+def test_propose_setup_returns_real_backtest_count(ctx, monkeypatch):
+    """When backtest yields > 0, tool overwrites the LLM-supplied
+    placeholder backtest_count with the real number."""
+    from ai.schemas import SetupProposal
+    fake_setup = SetupProposal(
+        name="empty-filter-setup",
+        tier="normal",
+        # Empty filter → matches every corpus job (per domain.scoring's
+        # empty-spec semantics)
+        filter_dsl={},
+        prose="Test prose definition that satisfies the schema length floor.",
+        backtest_count=0,  # LLM placeholder; we'll see this overwritten
+        why_demand="Corpus snapshot shows abundant jobs in this niche per evidence.",
+        why_gap="Operator portfolio coverage is partial but shippable.",
+        why_goal_fit="Goal alignment is straightforward at the proposed thresholds.",
+    )
+    monkeypatch.setattr(
+        "ai.ba_proposer.propose_setup",
+        lambda *args, **kwargs: fake_setup,
+    )
+
+    tools = build_tools(ctx)
+    ps = next(t for t in tools if t.name == "propose_setup_from_corpus")
+    result = ps.invoke({"theme": "anything"})
+
+    # Either: corpus is empty in the test DB → error, or has rows → real count
+    if "error" in result:
+        # Empty DB path — error surfaces the proposal too
+        assert "0 corpus matches" in result["error"]
+    else:
+        assert "backtest_count" in result
+        assert result["backtest_count"] > 0  # overwritten with real count
+        assert "backtest" in result
+
+
+def test_pacing_apply_from_sysconfig(ctx):
+    """The apply_from_sysconfig helper actually mutates the live pacer."""
+    from storage.conversations import SystemConfigStore
+    from substrate import pacing
+    sysconfig = SystemConfigStore(ctx.db)
+    prior_value = sysconfig.get("pacing_budget_per_hour")
+    prior_pacer = pacing.get_pacer().cfg.max_actions_per_hour
+    try:
+        sysconfig.set("pacing_budget_per_hour", 777)
+        pacing.apply_from_sysconfig(sysconfig)
+        assert pacing.get_pacer().cfg.max_actions_per_hour == 777
+    finally:
+        # Restore
+        pacing.set_max_actions_per_hour(prior_pacer)
+        if prior_value is None:
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM system_config WHERE key = 'pacing_budget_per_hour'"
+                    )
+        else:
+            sysconfig.set("pacing_budget_per_hour", prior_value)

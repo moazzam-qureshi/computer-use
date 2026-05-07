@@ -812,6 +812,42 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
             capture_before=before, apply_mutation=apply, capture_after=after,
         )
 
+    @tool
+    def set_pacing_budget(per_hour: int) -> dict:
+        """Set the substrate's max actions per hour (shared by bidder +
+        Researcher). Default is 500/hr; raise it when the Researcher needs
+        more headroom for a deep pass, lower it for stealth.
+
+        Both loops read this value from system_config at the top of every
+        cycle, so changes take effect on the next cycle without a restart.
+        """
+        try:
+            per_hour_int = int(per_hour)
+        except (ValueError, TypeError):
+            return {"error": f"validation: per_hour must be an integer, got {per_hour!r}"}
+        if per_hour_int < 1:
+            return {"error": "validation: per_hour must be >= 1"}
+
+        def before():
+            return {"pacing_budget_per_hour": sysconfig.get("pacing_budget_per_hour")}
+
+        def apply():
+            sysconfig.set("pacing_budget_per_hour", per_hour_int)
+            # Apply to the live pacer immediately so any loop already mid-
+            # cycle picks up the new value at its next pacer.before_action.
+            from substrate import pacing as _pacing
+            _pacing.set_max_actions_per_hour(per_hour_int)
+            return {"pacing_budget_per_hour": per_hour_int}
+
+        def after():
+            return {"pacing_budget_per_hour": sysconfig.get("pacing_budget_per_hour")}
+
+        return _audited_write(
+            ctx, tool_name="set_pacing_budget",
+            arguments={"per_hour": per_hour_int},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
     def _make_bidder_pause_tool(name: str, target: bool, narrative: str):
         @tool(name, description=narrative)
         def _f() -> dict:
@@ -1052,7 +1088,7 @@ def build_tools(ctx: ToolContext) -> list[BaseTool]:
         add_ignored_client, remove_ignored_client,
         set_setup_tier, set_auto_apply,
         pause_setup, resume_setup, archive_setup,
-        create_setup, set_connects_cap,
+        create_setup, set_connects_cap, set_pacing_budget,
         pause_bidder, resume_bidder,
         update_pitch_tone,
         set_goal, clear_goal,
@@ -1193,5 +1229,21 @@ def _apply_revert(ctx: ToolContext, tool_name: str, arguments: dict, before_stat
         if before_state is None:
             return
         sysconfig.set("researcher_query_portfolio", before_state["portfolio"])
+    elif tool_name == "set_pacing_budget":
+        # before_state has the prior {pacing_budget_per_hour} value (or None
+        # if it was never set explicitly).
+        if before_state is None:
+            return
+        prior = before_state.get("pacing_budget_per_hour")
+        if prior is None:
+            # Was never set — delete the key so substrate falls back to
+            # the module-level default.
+            with ctx.db.transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM system_config WHERE key = 'pacing_budget_per_hour'")
+        else:
+            sysconfig.set("pacing_budget_per_hour", int(prior))
+            from substrate import pacing as _pacing
+            _pacing.set_max_actions_per_hour(int(prior))
     else:
         raise ValueError(f"no revert handler for tool {tool_name!r}")
