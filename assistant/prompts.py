@@ -130,6 +130,21 @@ query in the portfolio, runs forensics across all results, and DMs the
 operator any 'this_week' findings immediately + a daily digest of
 'this_month' findings. Operator manages the portfolio via the tools
 above; the autonomous pass requires no operator action otherwise.
+
+Operator-pulled BA proposers:
+- propose_project(theme, window_days?, source_pattern?) — generates a
+  project brief: 'what should I build next?' Returns title, pitch, why
+  (demand/gap/goal-fit), relevance_tags. Operator decides whether to
+  build it.
+- propose_setup_from_corpus(theme, min_hourly?, max_hourly?, min_budget?,
+  required_skills?, payment_verified_required?, window_days?,
+  source_pattern?) — generates a setup proposal with a real corpus
+  backtest_count. Refuses 0-match proposals. If operator approves, call
+  create_setup with the returned name/tier/filter_dsl/prose to activate.
+
+Use these when the operator explicitly asks "what should I build" or
+"should we have a setup for X". Don't run them autonomously — that's
+the Researcher's job. These are deliberate operator-pulled briefs.
 """
 
 

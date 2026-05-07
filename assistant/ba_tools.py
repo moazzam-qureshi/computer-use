@@ -423,9 +423,154 @@ def build_ba_tools(ctx) -> list[BaseTool]:
             capture_before=before, apply_mutation=apply, capture_after=after,
         )
 
+    # ---- BA proposers (R-Task 11) — operator-pulled briefs ----
+
+    from ai.ba_proposer import propose_project_brief, propose_setup
+    from ai.market_analysis import backtest_filter_dsl
+    from storage.goals import GoalStore
+    from storage.portfolio import PortfolioStore as _PortfolioStore
+
+    portfolio_store = _PortfolioStore(ctx.db)
+    goals_store = GoalStore(ctx.db)
+
+    @tool
+    def propose_project(
+        theme: str,
+        window_days: int = 30,
+        source_pattern: Optional[str] = None,
+    ) -> dict:
+        """Generate a project brief: 'what should I build next?'
+
+        Reads corpus + portfolio + active goal. Returns a ProjectGapBrief
+        with REQUIRED WHY fields (demand evidence + portfolio gap + goal
+        fit). Use when the operator says 'what should I build?' or 'show
+        me a project brief for X'.
+
+        theme: free-text (e.g. 'voice AI agents', 'RAG eval pipelines')
+        window_days: corpus lookback (default 30)
+        source_pattern: optional SQL LIKE pattern to scope the corpus
+                        (e.g. 'ba:%RAG%' to only consider BA-RAG-scanned
+                        rows). None = all corpus.
+        """
+        if not theme or not theme.strip():
+            return {"error": "validation: theme is required"}
+        try:
+            brief = propose_project_brief(
+                ctx.db, theme=theme.strip(),
+                portfolio=portfolio_store.list_all(),
+                active_goal=goals_store.get_active(),
+                window_days=int(window_days),
+                source_pattern=source_pattern,
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"propose_project failed: {type(e).__name__}: {e}"}
+        if brief is None:
+            return {
+                "error": "LLM produced output that didn't pass schema validation; "
+                         "WHY fields likely too short. Retry or refine the theme."
+            }
+        return brief.model_dump()
+
+    @tool
+    def propose_setup_from_corpus(
+        theme: str,
+        # Filter-hint args mirror search_market — flat kwargs to avoid the
+        # nested-dict trap. The proposer LLM uses these as a starting point
+        # for filter_dsl but may refine.
+        min_hourly: Optional[float] = None,
+        max_hourly: Optional[float] = None,
+        min_budget: Optional[float] = None,
+        required_skills: Optional[list] = None,
+        payment_verified_required: Optional[bool] = None,
+        window_days: int = 30,
+        source_pattern: Optional[str] = None,
+    ) -> dict:
+        """Generate a setup proposal: 'should we have a setup for X?'
+
+        Returns a SetupProposal with REQUIRED WHY fields PLUS a
+        backtest_count from running the proposed filter_dsl against the
+        corpus. REFUSES proposals with backtest_count == 0 — if the
+        corpus has no matches, suggests widening the theme or running
+        more search_market scans first.
+
+        After review, operator can call create_setup with the returned
+        name/tier/filter_dsl/prose to actually activate the setup.
+
+        theme: free-text describing the niche
+        min_hourly / max_hourly / min_budget / required_skills /
+            payment_verified_required: optional filter-hint kwargs
+        window_days: corpus + backtest window (default 30)
+        source_pattern: optional SQL LIKE to scope the corpus
+        """
+        if not theme or not theme.strip():
+            return {"error": "validation: theme is required"}
+
+        # Build filter_hint dict from the optional flat args
+        hint = {}
+        if min_hourly is not None:
+            hint["min_hourly"] = float(min_hourly)
+        if max_hourly is not None:
+            hint["max_hourly"] = float(max_hourly)
+        if min_budget is not None:
+            hint["min_budget"] = float(min_budget)
+        if required_skills:
+            hint["required_skills"] = list(required_skills)
+        if payment_verified_required is not None:
+            hint["payment_verified_required"] = bool(payment_verified_required)
+
+        try:
+            proposal = propose_setup(
+                ctx.db, theme=theme.strip(),
+                portfolio=portfolio_store.list_all(),
+                active_goal=goals_store.get_active(),
+                filter_hint=hint,
+                window_days=int(window_days),
+                source_pattern=source_pattern,
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"propose_setup failed: {type(e).__name__}: {e}"}
+
+        if proposal is None:
+            return {
+                "error": "LLM produced output that didn't pass schema validation; "
+                         "WHY fields likely too short. Retry or refine the theme."
+            }
+
+        # Backtest the proposed filter_dsl against the corpus.
+        try:
+            backtest = backtest_filter_dsl(
+                ctx.db,
+                filter_dsl=proposal.filter_dsl,
+                window_days=int(window_days),
+            )
+        except Exception as e:  # noqa: BLE001
+            return {
+                "error": f"proposal generated but backtest failed: "
+                         f"{type(e).__name__}: {e}",
+                "proposal": proposal.model_dump(),
+            }
+
+        if backtest.match_count == 0:
+            return {
+                "error": (
+                    "proposed filter has 0 corpus matches in the last "
+                    f"{window_days} days; widen the theme or run more "
+                    "search_market scans to seed the corpus, then retry."
+                ),
+                "proposal": proposal.model_dump(),
+                "backtest": backtest.to_dict(),
+            }
+
+        # Overwrite the LLM-supplied backtest_count placeholder with reality.
+        out = proposal.model_dump()
+        out["backtest_count"] = backtest.match_count
+        out["backtest"] = backtest.to_dict()
+        return out
+
     return [
         search_market, analyze_corpus, backtest_setup,
         list_findings, get_finding,
         dismiss_finding, snooze_finding,
         list_research_queries, add_research_query, remove_research_query,
+        propose_project, propose_setup_from_corpus,
     ]

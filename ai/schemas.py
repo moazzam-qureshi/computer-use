@@ -201,3 +201,106 @@ class JobForensicFinding(BaseModel):
             "rejected by the call site."
         ),
     )
+
+
+class ProjectGapBrief(BaseModel):
+    """Operator-pulled brief: 'what should I build next?'
+
+    Same WHY-enforcement philosophy as JobForensicFinding. The schema makes
+    the LLM cite demand evidence + portfolio gap + goal fit; if it can't,
+    pydantic rejects the response and the tool surfaces the error.
+    """
+
+    title: str = Field(
+        min_length=10,
+        description="Short name for the project to build. Concrete, not generic.",
+    )
+    one_line_pitch: str = Field(
+        min_length=30,
+        description="One-sentence summary of what this project IS.",
+    )
+    why_demand: str = Field(
+        min_length=40,
+        description=(
+            "Cite corpus evidence: how many jobs / what budget range / what "
+            "skills are repeatedly asked for. Must include numbers from the "
+            "analyze_corpus snapshot."
+        ),
+    )
+    why_gap: str = Field(
+        min_length=30,
+        description=(
+            "Cite portfolio.json items by name. What's missing that this "
+            "project would fill?"
+        ),
+    )
+    why_goal_fit: str = Field(
+        min_length=30,
+        description=(
+            "Cite the active goal (min_hourly / min_budget / preferred_country / "
+            "prose). How does building this unlock the goal?"
+        ),
+    )
+    relevance_tags: list[str] = Field(
+        min_length=1,
+        description=(
+            "Tags to add to portfolio.json once the project ships. These "
+            "will become the matching surface for future BA gap analysis."
+        ),
+    )
+
+
+class SetupProposal(BaseModel):
+    """Operator-pulled proposal: 'should we have a setup for X?'
+
+    The proposer runs backtest_setup INTERNALLY before returning so
+    backtest_count is grounded in real corpus matches. Refuses zero-match
+    proposals — see assistant.ba_tools.propose_setup_from_corpus.
+    """
+
+    name: str = Field(
+        min_length=5,
+        description="Short setup name. Will become setups.name if approved.",
+    )
+    tier: Literal["quiet", "normal", "critical"] = Field(
+        description=(
+            "How loud this setup should be. quiet = whisper-only digests, "
+            "normal = standard signal + DM, critical = high-priority + escalation."
+        ),
+    )
+    filter_dsl: dict = Field(
+        description=(
+            "filter_dsl in the same shape as setups.filter_dsl. Will be "
+            "validated through create_setup if operator approves."
+        ),
+    )
+    prose: str = Field(
+        min_length=30,
+        description=(
+            "Prose definition fed to the per-job relevance LLM. Specific, "
+            "not generic — describes what makes a job actually fit this setup."
+        ),
+    )
+    backtest_count: int = Field(
+        ge=0,
+        description=(
+            "Count of corpus jobs in last 30 days that would have matched "
+            "this filter_dsl. Set by the proposer (NOT the LLM); embedded "
+            "for operator review."
+        ),
+    )
+    why_demand: str = Field(
+        min_length=40,
+        description="Cite corpus evidence justifying this setup's existence.",
+    )
+    why_gap: str = Field(
+        min_length=30,
+        description=(
+            "Cite portfolio.json items. Why does the operator have an angle "
+            "on this niche specifically?"
+        ),
+    )
+    why_goal_fit: str = Field(
+        min_length=30,
+        description="Cite the active goal. How does this setup advance it?",
+    )
