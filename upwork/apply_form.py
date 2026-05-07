@@ -186,6 +186,35 @@ def _find_cover_letter_textarea():
     return edits[0]
 
 
+def _click_with_lift_retry(click_fn, *args, max_lifts: int = 4, **kwargs) -> None:
+    """Run a click; if it raises ClickOutOfViewport (target sits in the
+    taskbar zone), arrow-up to lift the page and retry.
+
+    Tall elements (cover letter textarea, screening-question boxes) sit
+    near the bottom of the apply page. PageDown often lands them with
+    the bottom edge clipped behind the taskbar so the element's center
+    falls into the refusal zone. A handful of Up-arrow presses rolls the
+    page up enough that the element's center lifts above the safe
+    viewport without losing it from view.
+
+    Re-raises ClickOutOfViewport if max_lifts retries don't help so
+    callers see the original error rather than a silent miss.
+    """
+    last_exc = None
+    for _ in range(max_lifts + 1):
+        try:
+            click_fn(*args, **kwargs)
+            return
+        except act.ClickOutOfViewport as e:
+            last_exc = e
+            # Arrow-up scrolls ~40px; a few presses lifts a ~250px
+            # element fully above the y_max=1136 safe line.
+            act.scroll(1, method="arrow")
+            time.sleep(0.25)
+    if last_exc is not None:
+        raise last_exc
+
+
 def paste_cover_letter(window_title: str, text: str) -> bool:
     """PageDown until the Cover Letter textarea appears, click it, paste via clipboard.
     Returns True on success, False if the textarea wasn't found.
@@ -194,7 +223,13 @@ def paste_cover_letter(window_title: str, text: str) -> bool:
     for attempt in range(max_scrolls + 1):
         el = _find_cover_letter_textarea()
         if el is not None:
-            act.click(el)
+            try:
+                _click_with_lift_retry(act.click, el)
+            except act.ClickOutOfViewport:
+                # Even after lift retries the target stayed in the taskbar
+                # zone. Surface as not-found so caller treats it as a
+                # findable-but-unreachable element rather than a hard error.
+                return False
             time.sleep(0.4)
             pyperclip.copy(text)
             time.sleep(0.2)
@@ -256,7 +291,12 @@ def answer_screening_questions(window_title: str, answers: dict) -> int:
         l, t, r, b = bounds
         cx = (l + r) // 2
         cy = b + offset_y
-        act.click_xy(cx, cy)
+        try:
+            _click_with_lift_retry(act.click_xy, cx, cy)
+        except act.ClickOutOfViewport:
+            # Couldn't lift this question's textarea above the taskbar
+            # zone. Skip it; operator answers manually.
+            continue
         time.sleep(0.4)
         pyperclip.copy(answer)
         time.sleep(0.2)
@@ -297,7 +337,10 @@ def select_never_for_rate_increase(window_title: str) -> bool:
 
     l, t, r, b = dropdown_text_el.bounds
     cx, cy = (l + r) // 2, (t + b) // 2
-    act.click_xy(cx, cy)
+    try:
+        _click_with_lift_retry(act.click_xy, cx, cy)
+    except act.ClickOutOfViewport:
+        return False
     time.sleep(0.8)
 
     try:
@@ -306,7 +349,10 @@ def select_never_for_rate_increase(window_title: str) -> bool:
         return False
     for e in obs2.elements:
         if e.role == "listitem" and (e.name or "").strip().lower() == "never":
-            act.click(e)
+            try:
+                _click_with_lift_retry(act.click, e)
+            except act.ClickOutOfViewport:
+                return False
             time.sleep(0.5)
             return True
     return False
