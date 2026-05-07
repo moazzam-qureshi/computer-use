@@ -134,6 +134,12 @@ async def bidder_loop(bot, settings: Settings, db: Database, humanizer: Humanize
     while True:
         now = datetime.now(timezone.utc)
 
+        # Pull operator-tunable pacing budget from system_config. Cheap
+        # (single key lookup); applies on the next action via the live
+        # pacer's mutable config.
+        from substrate import pacing as _pacing
+        _pacing.apply_from_sysconfig(SystemConfigStore(db))
+
         # 1. Always check for force-run first. /bidder run-now should fire
         #    within ~30s (the polling interval), regardless of pause / sleep
         #    window state.
@@ -342,11 +348,13 @@ async def main():
         await handle(message, db=db)
 
     async def setup_hook():
-        print("setup_hook fired; starting sniper + apply_executor + brief_watcher loops", flush=True)
+        print("setup_hook fired; starting sniper + apply_executor + brief_watcher + researcher loops", flush=True)
         bot.loop.create_task(run_sniper_loop(bot, settings, db, humanizer, ui_lock))
         bot.loop.create_task(apply_executor_loop(bot, settings, db, humanizer))
         from assistant.brief_watcher import run_brief_watcher
         bot.loop.create_task(run_brief_watcher(db, bot, settings))
+        from researcher.scheduler import run_researcher_scheduler
+        bot.loop.create_task(run_researcher_scheduler(bot, settings, db, ui_lock))
 
     bot.setup_hook = setup_hook
 
