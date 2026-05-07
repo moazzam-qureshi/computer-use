@@ -127,3 +127,76 @@ def test_skills_persisted(fresh_db):
             """)
             names = [r[0] for r in cur.fetchall()]
     assert set(names) == {"RAG", "Python", "LangChain", "Voice AI", "Twilio"}
+
+
+# ----- ingest_jobs (deep-scan path) -----
+
+def _deep_jobs():
+    """Domain Job objects with REAL Upwork URLs — what deep_search returns."""
+    from domain.types import Job
+    return [
+        Job(
+            job_id="~01abc111",
+            url="https://www.upwork.com/jobs/Build-RAG-eval_~01abc111",
+            title="Build a RAG eval pipeline",
+            description="Full description text from the panel walk...",
+            budget_kind="hourly",
+            budget_min_usd=60.0, budget_max_usd=90.0,
+            skills=["RAG", "LangChain"],
+            client_country="United States",
+            client_payment_verified=True,
+        ),
+        Job(
+            job_id="~01abc222",
+            url="https://www.upwork.com/jobs/Voice-AI-agent_~01abc222",
+            title="Voice AI agent for support desk",
+            description="Need a Twilio + LiveKit voice agent...",
+            budget_kind="fixed",
+            budget_min_usd=5000.0, budget_max_usd=5000.0,
+            skills=["Voice AI", "Twilio"],
+            client_country="Germany",
+            client_payment_verified=True,
+        ),
+    ]
+
+
+def test_ingest_jobs_first_pass_inserts(fresh_db):
+    corpus = MarketCorpusStore(fresh_db)
+    result = corpus.ingest_jobs(_deep_jobs(), source="ba:rag deep")
+    assert result == {"inserted": 2, "updated_existing": 0}
+    with fresh_db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM jobs")
+            assert cur.fetchone()[0] == 2
+            cur.execute(
+                "SELECT description FROM jobs WHERE job_id = '~01abc111'"
+            )
+            desc = cur.fetchone()[0]
+            assert "Full description" in desc
+
+
+def test_ingest_jobs_repeat_is_idempotent(fresh_db):
+    """Same jobs ingested twice — second pass updates, no new rows."""
+    corpus = MarketCorpusStore(fresh_db)
+    corpus.ingest_jobs(_deep_jobs(), source="ba:rag deep")
+    second = corpus.ingest_jobs(_deep_jobs(), source="ba:rag deep")
+    assert second == {"inserted": 0, "updated_existing": 2}
+    with fresh_db.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM jobs")
+            assert cur.fetchone()[0] == 2
+
+
+def test_ingest_jobs_skips_titleless(fresh_db):
+    from domain.types import Job
+    corpus = MarketCorpusStore(fresh_db)
+    bad = Job(job_id="~xyz", url="https://www.upwork.com/jobs/x_~xyz",
+              title="")
+    result = corpus.ingest_jobs([bad], source="ba:test")
+    assert result == {"inserted": 0, "updated_existing": 0}
+
+
+def test_ingest_jobs_empty_source_rejected(fresh_db):
+    corpus = MarketCorpusStore(fresh_db)
+    with pytest.raises(ValueError):
+        corpus.ingest_jobs(_deep_jobs(), source="")

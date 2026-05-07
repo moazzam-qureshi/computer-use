@@ -136,3 +136,77 @@ def test_feed_card_lift_payment_verified_false_becomes_none():
     cr = _feed_card_to_card_result(fc)
     assert cr is not None
     assert cr.payment_verified is None
+
+
+# ----- _job_id_from_url + _panel_data_to_job (deep_search helpers) -----
+
+def test_job_id_from_url_canonical():
+    from upwork.search_driver import _job_id_from_url
+    assert _job_id_from_url(
+        "https://www.upwork.com/jobs/Build-RAG-eval-pipeline_~01abc123def456"
+    ) == "~01abc123def456"
+
+
+def test_job_id_from_url_no_match_returns_none():
+    from upwork.search_driver import _job_id_from_url
+    assert _job_id_from_url("https://www.example.com/foo/bar") is None
+    assert _job_id_from_url("") is None
+
+
+def test_panel_data_to_job_full():
+    """A full PanelData yields a Job with all key fields populated."""
+    from upwork.panel import PanelData
+    from upwork.search_driver import _panel_data_to_job
+
+    panel = PanelData(
+        title="Build a RAG eval pipeline",
+        posted_text="20 minutes ago",
+        budget_kind="hourly",
+        budget_min_usd=60.0,
+        budget_max_usd=90.0,
+        budget_raw_text="$60-$90/hr",
+        duration=None,
+        experience_level="Expert",
+        hours_per_week=None,
+        skills=["RAG", "LangChain", "Python"],
+        description="Long description...",
+        client_country="United States",
+        client_payment_verified=True,
+        client_rating=4.9,
+        client_hires=12,
+        client_total_spent_usd=50000.0,
+        proposals_count=8,
+    )
+    url = "https://www.upwork.com/jobs/Build-a-RAG-eval-pipeline_~01abc123"
+    job = _panel_data_to_job(panel, url)
+    assert job.job_id == "~01abc123"
+    assert job.url == url
+    assert job.title == "Build a RAG eval pipeline"
+    assert job.description == "Long description..."
+    assert job.budget_kind == "hourly"
+    assert job.budget_min_usd == 60.0
+    assert job.skills == ["RAG", "LangChain", "Python"]
+    assert job.client_country == "United States"
+    assert job.client_payment_verified is True
+    assert job.client_total_spent_usd == 50000.0
+    assert job.proposals_count_at_first_scrape == 8
+    assert job.posted_at is not None  # parsed from "20 minutes ago"
+
+
+def test_panel_data_to_job_url_parse_failure_falls_back():
+    """When URL doesn't match the canonical pattern, job_id falls back to
+    the URL itself so the row can still be persisted."""
+    from upwork.panel import PanelData
+    from upwork.search_driver import _panel_data_to_job
+
+    panel = PanelData(
+        title="t", posted_text=None, budget_kind=None,
+        budget_min_usd=None, budget_max_usd=None, budget_raw_text=None,
+        duration=None, experience_level=None, hours_per_week=None,
+        skills=[], description="",
+    )
+    job = _panel_data_to_job(panel, "")
+    # url falls back to deep://<job_id> which equals the empty-string fallback
+    # — the URL is still distinct (so jobs.url UNIQUE doesn't collide).
+    assert job.title == "t"
+    assert job.url.startswith("deep://")

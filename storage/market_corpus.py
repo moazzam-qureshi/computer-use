@@ -110,3 +110,37 @@ class MarketCorpusStore:
             else:
                 inserted += 1
         return {"inserted": inserted, "updated_existing": updated}
+
+    def ingest_jobs(self, jobs: Iterable, source: str) -> dict:
+        """Write deep-scanned Job objects to the corpus. Idempotent.
+
+        Distinct from ingest_cards: deep-scanned jobs have REAL Upwork URLs
+        (captured via clipboard click during the panel walk). Dedup is via
+        the canonical job_id parsed from the URL, which JobStore.upsert's
+        ON CONFLICT (job_id) DO UPDATE handles natively.
+
+        Same query re-scanned tomorrow may re-touch some of the same jobs;
+        the upsert refreshes their fields without producing new rows.
+
+        Args:
+            jobs: domain.types.Job instances from
+                  upwork.search_driver.deep_search()
+            source: source tag, same convention as ingest_cards.
+
+        Returns:
+            {"inserted": N, "updated_existing": M}.
+        """
+        if not source:
+            raise ValueError("source must be a non-empty string")
+        inserted = 0
+        updated = 0
+        for job in jobs:
+            if not getattr(job, "title", None):
+                continue
+            already_present = self._jobs.is_known(job.job_id)
+            self._jobs.upsert(job, source=source, raw_panel={"_ba_deep": True})
+            if already_present:
+                updated += 1
+            else:
+                inserted += 1
+        return {"inserted": inserted, "updated_existing": updated}

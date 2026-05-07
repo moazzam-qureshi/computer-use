@@ -1,16 +1,20 @@
-"""Card-level search driver for the BA module.
+"""Card-level + deep-level search driver for the BA / Researcher modules.
 
-Drives Chrome to a constructed Upwork search URL, waits for results to render,
-and walks the UIA tree once to parse all visible result cards. Card-level only
-— no panel-open, no clipboard URL capture per card. The bidder still owns
-deep panel scans; this driver is for cheap, fast market-corpus growth.
+Two entry points:
 
-Mirrors the substrate recipe used by bidder/detection_loop.py:
-  focus -> navigate -> wait-for-render -> Ctrl+Home -> zoom 33% -> observe
-  -> reset zoom -> parse.
+- search(): card-level only. Drives Chrome to a constructed Upwork search
+  URL, walks the UIA tree once at 33% zoom, parses all visible result
+  cards. Fast (~5s per query), no panel-open. Used by the assistant's
+  on-demand search_market tool.
 
-Uses upwork.search.build_search_url for URL construction (see ALLOWED_FILTER_KEYS
-in that module for the 6 valid filter keys).
+- deep_search(): same URL navigation, but for each visible result card
+  it clicks into the panel, captures the full description + real Upwork
+  URL via clipboard, then closes. Slower (~15s per job × N jobs) but
+  produces full Job objects suitable for forensic analysis. Used by the
+  Researcher's autonomous loop.
+
+Both reuse upwork.search.build_search_url for URL construction (see
+ALLOWED_FILTER_KEYS for the 6 valid filter keys).
 """
 from __future__ import annotations
 
@@ -22,8 +26,9 @@ from typing import Optional
 
 from substrate import act
 from upwork import feed_zoom
-from upwork.feed import CHROME_WINDOW_CANDIDATES
+from upwork.feed import CHROME_WINDOW_CANDIDATES, _parse_visible_cards
 from upwork.feed_cards import extract_cards_from_window, FeedCard
+from upwork.panel import PanelData, capture_panel, parse_panel
 from upwork.search import build_search_url
 
 
@@ -269,5 +274,212 @@ def search_and_ingest(
                 "payment_verified": c.payment_verified,
             }
             for c in cards[:3]
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Deep search: panel-level capture for the Researcher.
+# ---------------------------------------------------------------------------
+
+# Upwork URLs look like https://www.upwork.com/jobs/<title-slug>_~01abc123
+# The canonical job_id is the trailing ~01... token.
+_JOB_ID_FROM_URL_RE = re.compile(r"~([0-9A-Za-z]+)\b")
+
+# Per-card click overhead: panel slide-in (~3.5s) + capture_panel walk
+# (~5-8s typical) + Esc close (~1.5s). Budget per card: ~12-15s.
+_PANEL_OPEN_SETTLE_S = 3.5
+_PANEL_CLOSE_SETTLE_S = 1.5
+_DEEP_SEARCH_RENDER_WAIT_S = 15.0
+
+
+def _job_id_from_url(url: str) -> Optional[str]:
+    """Extract the canonical Upwork job_id token from a job URL.
+    Returns None if the URL doesn't match the expected pattern.
+    """
+    if not url:
+        return None
+    m = _JOB_ID_FROM_URL_RE.search(url)
+    return m.group(0) if m else None  # group(0) keeps the leading ~
+
+
+def _panel_data_to_job(panel: PanelData, url: str):
+    """Convert a parsed PanelData + captured URL into a domain.types.Job.
+
+    Local import to avoid a cycle (domain doesn't depend on upwork; this
+    helper exists at the boundary).
+    """
+    from domain.types import Job
+
+    job_id = _job_id_from_url(url) or url  # url itself as last-resort id
+    return Job(
+        job_id=job_id,
+        url=url or f"deep://{job_id}",
+        title=panel.title,
+        description=panel.description or None,
+        budget_kind=panel.budget_kind,
+        budget_min_usd=panel.budget_min_usd,
+        budget_max_usd=panel.budget_max_usd,
+        skills=list(panel.skills or []),
+        client_country=panel.client_country,
+        client_payment_verified=panel.client_payment_verified,
+        client_rating=panel.client_rating,
+        client_hires=panel.client_hires,
+        client_total_spent_usd=panel.client_total_spent_usd,
+        posted_at=_parse_relative_time(panel.posted_text),
+        posted_text=panel.posted_text,
+        proposals_count_at_first_scrape=panel.proposals_count,
+    )
+
+
+def deep_search(
+    query: str,
+    filters: Optional[dict] = None,
+    max_jobs: int = 30,
+    window_title: str = "Upwork",
+) -> list:
+    """Drive Chrome to the search URL, then panel-open each result and
+    capture the full Job (description, real URL, full client metadata).
+
+    Returns a list[Job] (domain.types.Job). Empty list if the page yielded
+    no clickable results within the budget.
+
+    Caller MUST hold the substrate ui_lock for the entire call. Caller
+    MUST have already configured act.set_target_window if the substrate
+    accepts multiple window-title candidates.
+
+    Pacing: every navigate / click / Esc / observe routes through the
+    shared pacing budget. A deep pass over 30 jobs eats ~150 actions in
+    ~7 minutes wall-clock. The Researcher operates within the raised
+    120/hr default.
+    """
+    from domain.types import Job  # noqa: F401  — used via _panel_data_to_job
+
+    url = build_search_url(query, filters or {})
+    _focus_chrome()
+    act.navigate(url)
+    time.sleep(_DEEP_SEARCH_RENDER_WAIT_S)
+    act.focus_window(window_title)
+    act.key("ctrl+home")
+    time.sleep(0.6)
+
+    # Reuse the feed's _parse_visible_cards: search-results pages share
+    # the 'Posted' anchor + 'Save job <title>' button layout. Returns
+    # list[(title, hyperlink_element)].
+    title_pairs = _parse_visible_cards(window_title)
+    if not title_pairs:
+        return []
+
+    out: list = []
+    seen_titles: set[str] = set()
+
+    for title, link_el in title_pairs:
+        if title in seen_titles:
+            continue
+        seen_titles.add(title)
+        if len(out) >= max_jobs:
+            break
+
+        # Click the title hyperlink. capture_panel will detect when the
+        # panel is open (it polls for the "Apply now" anchor internally).
+        try:
+            act.focus_window(window_title)
+            act.click(link_el)
+        except Exception:
+            continue  # stale ref or off-screen; skip this card
+        time.sleep(_PANEL_OPEN_SETTLE_S)
+
+        try:
+            elements, captured_url = capture_panel(window_title)
+        except Exception:
+            elements, captured_url = [], ""
+
+        if not elements:
+            # Panel never opened or capture_panel returned nothing useful.
+            # Esc and continue — losing this card is preferable to wedging.
+            try:
+                act.focus_window(window_title)
+                act.key("escape")
+                time.sleep(_PANEL_CLOSE_SETTLE_S)
+            except Exception:
+                pass
+            continue
+
+        try:
+            panel_data = parse_panel(elements)
+        except Exception:
+            try:
+                act.focus_window(window_title)
+                act.key("escape")
+                time.sleep(_PANEL_CLOSE_SETTLE_S)
+            except Exception:
+                pass
+            continue
+
+        if panel_data.title:
+            job = _panel_data_to_job(panel_data, captured_url)
+            out.append(job)
+
+        # Always close the panel before the next click, even if parse
+        # succeeded — leaving a panel open wedges the next card click.
+        try:
+            act.focus_window(window_title)
+            act.key("escape")
+            time.sleep(_PANEL_CLOSE_SETTLE_S)
+        except Exception:
+            pass
+
+    return out
+
+
+def deep_search_and_ingest(
+    db,
+    query: str,
+    filters: Optional[dict] = None,
+    max_jobs: int = 30,
+    window_title: str = "Upwork",
+) -> dict:
+    """Drive deep_search, then ingest the resulting Jobs into the corpus.
+
+    Returns:
+        {
+          "query": query,
+          "filters": filters or {},
+          "source": source_tag(...),
+          "scanned": len(jobs),
+          "inserted": N,
+          "updated_existing": M,
+          "sample": [first 3 jobs as compact dicts]
+        }
+    """
+    from storage.market_corpus import MarketCorpusStore
+
+    jobs = deep_search(query, filters, max_jobs=max_jobs,
+                       window_title=window_title)
+    source = source_tag(query, filters)
+    corpus = MarketCorpusStore(db)
+    counts = corpus.ingest_jobs(jobs, source=source)
+    return {
+        "query": query,
+        "filters": filters or {},
+        "source": source,
+        "scanned": len(jobs),
+        "inserted": counts["inserted"],
+        "updated_existing": counts["updated_existing"],
+        "sample": [
+            {
+                "job_id": j.job_id,
+                "url": j.url,
+                "title": j.title,
+                "budget_kind": j.budget_kind,
+                "budget_min_usd": j.budget_min_usd,
+                "budget_max_usd": j.budget_max_usd,
+                "posted_text": j.posted_text,
+                "skills": (j.skills or [])[:5],
+                "client_country": j.client_country,
+                "client_payment_verified": j.client_payment_verified,
+                "description_chars": len(j.description or ""),
+            }
+            for j in jobs[:3]
         ],
     }
