@@ -124,3 +124,80 @@ class PanelExtraction(BaseModel):
     client_total_spent_usd: Optional[float] = Field(default=None, description="Total amount the client has spent on Upwork in USD, e.g. 14000 for '$14K total spent'. Numeric only.")
     client_hires: Optional[int] = Field(default=None, description="Number of hires the client has made on Upwork, e.g. 58.")
     proposals_count: Optional[int] = Field(default=None, description="If the panel shows 'Proposals: 5 to 10' use the lower bound (5). If 'less than 5' use 5. None if not shown.")
+
+
+class JobForensicFinding(BaseModel):
+    """A specific actionable finding the Researcher surfaces from job descriptions.
+
+    The whole point of this schema is to enforce specificity. min_length on the
+    WHY fields prevents the LLM from returning shallow filler like "AI is hot".
+    Empty evidence_job_ids is rejected (single-job 'patterns' aren't patterns).
+    Hallucinated job_ids (not in input batch) are rejected at the call site.
+
+    See docs/superpowers/specs/2026-05-05-researcher-design.md §5.5.
+    """
+
+    finding_type: Literal[
+        "emerging_template",       # near-identical job descriptions
+        "failure_mode_pattern",    # multiple jobs cite the same failed thing
+        "tech_combo_emergence",    # specific tech combination spiking
+        "specific_stack_demand",   # explicit ask for a specific stack
+        "budget_anomaly",          # budget shift in a niche worth noting
+        "geographic_cluster",      # geographic concentration worth noting
+    ] = Field(description="Which kind of pattern this finding represents.")
+
+    headline: str = Field(
+        min_length=20,
+        description=(
+            "One-line specific summary. Right shape: '5 jobs this week want "
+            "Ragas + LangSmith integration'. Wrong shape: 'AI jobs trending up'."
+        ),
+    )
+
+    why_specific: str = Field(
+        min_length=40,
+        description=(
+            "Cite job evidence: which specific jobs this is based on, what "
+            "they say. Quote phrases when useful. Numbers help "
+            "('3 of 5 jobs explicitly mention Vapi'). NEVER 'multiple jobs' "
+            "or 'many clients' — be specific."
+        ),
+    )
+
+    portfolio_tie: str = Field(
+        min_length=30,
+        description=(
+            "Cite portfolio.json items by name. Either: (a) gap — operator "
+            "doesn't have this; building it would unlock these jobs. Or (b) "
+            "strength — operator's <named-project> matches; lead pitches with "
+            "it. Or (c) 'no portfolio fit' — surface only if urgency is high."
+        ),
+    )
+
+    suggested_action: str = Field(
+        min_length=30,
+        description=(
+            "Specific next step. Not 'consider RAG' — 'build a Ragas eval "
+            "demo this week, push to GitHub, add 1-paragraph case study to "
+            "portfolio before bidding any of these'."
+        ),
+    )
+
+    urgency: Literal["this_week", "this_month", "monitor"] = Field(
+        description=(
+            "this_week = act in <7 days or window closes (template emerging, "
+            "tactical opportunity). this_month = important but not closing "
+            "(persistent demand worth chasing). monitor = interesting but "
+            "not actionable yet (early signal, watch for development)."
+        ),
+    )
+
+    evidence_job_ids: list[str] = Field(
+        min_length=2,
+        description=(
+            "List of job_ids from the input batch this finding is based on. "
+            "MUST be at least 2 — single-job patterns are not patterns. "
+            "MUST be IDs from the actual input batch — fabricated IDs are "
+            "rejected by the call site."
+        ),
+    )
