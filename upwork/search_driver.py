@@ -156,6 +156,37 @@ def _focus_chrome() -> None:
     )
 
 
+def _open_url_in_new_tab(url: str, window_title: str) -> None:
+    """Force Chrome to the foreground via Ctrl+T (new tab is a synchronous
+    foreground event, unlike SetActive which Windows may not honor when
+    another app holds focus), navigate to the URL, wait for hydrate.
+
+    This mirrors upwork.feed.refresh_feed — the bidder uses the same
+    pattern for the same reason: SetActive on a window that lost focus
+    to another app sometimes silently fails on Windows, but Ctrl+T
+    inside Chrome always brings it forward because the new tab itself
+    is the foreground request.
+    """
+    _focus_chrome()
+    act.key("ctrl+t")
+    time.sleep(0.6)
+    act.navigate(url)
+    # Give the page time to render. Search results stream in; 15s is
+    # generous and matches the bidder's most-recent-feed wait.
+    time.sleep(_RESULTS_RENDER_WAIT_S)
+    # Re-verify focus AFTER hydrate. If Chrome got pushed back to
+    # background while loading, raise loudly rather than send keystrokes
+    # to whatever app stole focus.
+    for candidate in CHROME_WINDOW_CANDIDATES:
+        if act.focus_window(candidate):
+            return
+    raise RuntimeError(
+        "Chrome lost focus during page load. Try again with no other "
+        "active app stealing focus. (Or: Researcher running on a VM "
+        "where another OS-level event grabbed the foreground.)"
+    )
+
+
 def search(
     query: str,
     filters: Optional[dict] = None,
@@ -182,10 +213,7 @@ def search(
         RuntimeError if Chrome cannot be focused (run launch_chrome.py first).
     """
     url = build_search_url(query, filters or {})
-    _focus_chrome()
-    act.navigate(url)
-    time.sleep(_RESULTS_RENDER_WAIT_S)
-    act.focus_window(window_title)
+    _open_url_in_new_tab(url, window_title)
     act.key("ctrl+home")
     time.sleep(0.6)
     feed_zoom.zoom_to_33pct()
@@ -356,10 +384,7 @@ def deep_search(
     from domain.types import Job  # noqa: F401  — used via _panel_data_to_job
 
     url = build_search_url(query, filters or {})
-    _focus_chrome()
-    act.navigate(url)
-    time.sleep(_DEEP_SEARCH_RENDER_WAIT_S)
-    act.focus_window(window_title)
+    _open_url_in_new_tab(url, window_title)
     act.key("ctrl+home")
     time.sleep(0.6)
 
@@ -368,6 +393,19 @@ def deep_search(
     # list[(title, hyperlink_element)].
     title_pairs = _parse_visible_cards(window_title)
     if not title_pairs:
+        # Diagnostic: log foreground state so we know whether Chrome
+        # actually rendered or focus drifted to something else.
+        try:
+            import uiautomation as _uia
+            fg = _uia.GetForegroundControl()
+            fg_name = (fg.Name or "<no name>") if fg else "<no fg>"
+        except Exception:
+            fg_name = "<error reading fg>"
+        print(
+            f"[deep_search] no result cards parsed for {query!r}. "
+            f"Foreground window: {fg_name!r}. URL: {url}",
+            flush=True,
+        )
         return []
 
     out: list = []
