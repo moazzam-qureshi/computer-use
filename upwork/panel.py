@@ -238,9 +238,49 @@ def _parse_proposals(text: str) -> Optional[int]:
     return None
 
 
+_CLIENT_HISTORY_ANCHORS = (
+    "client's recent history",
+    "client's history",
+    "recent history",
+    "jobs in progress",
+)
+
+
+def _truncate_at_client_history(elems: list) -> list:
+    """Return elems sliced to drop everything from the client-history
+    section onward.
+
+    The Upwork panel renders the client's PRIOR JOB POSTINGS at the
+    bottom of the panel — each one with its own budget chip ('Hourly',
+    'Fixed-price'), skill chips, description preview, etc. If our
+    parser walks past this anchor it picks up budget/skill/etc tokens
+    from those prior jobs and overwrites the actual job's data with
+    the client-history bleed. Truncating here is the cleanest fix —
+    every legitimate field for THIS job appears before this section.
+
+    No-op if no anchor found (some panels don't render the section,
+    e.g. when the client has zero prior history).
+    """
+    for i, e in enumerate(elems):
+        if getattr(e, "role", "") != "text":
+            continue
+        n = (e.name or "").strip().lower()
+        if not n:
+            continue
+        for anchor in _CLIENT_HISTORY_ANCHORS:
+            if n.startswith(anchor):
+                return elems[:i]
+    return elems
+
+
 def parse_panel(elements: Iterable) -> PanelData:
     """Parse a panel's observed elements. Returns a PanelData with as many fields filled as possible."""
     elems = list(elements)
+    # Drop everything from the client-history section onward — those are
+    # the client's PRIOR job postings rendered with their own budget /
+    # skill / description chips. Walking past this anchor causes the
+    # parser to overwrite THIS job's fields with bleed from prior jobs.
+    elems = _truncate_at_client_history(elems)
 
     # ---- Title: prefer wide hyperlink near top; fall back to topmost text element.
     title = ""
