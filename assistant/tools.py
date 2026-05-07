@@ -1158,5 +1158,40 @@ def _apply_revert(ctx: ToolContext, tool_name: str, arguments: dict, before_stat
                 preferred_country=before_state.get("preferred_country"),
                 notes=before_state.get("notes"),
             ))
+    elif tool_name == "dismiss_finding":
+        # before_state has {status, dismissed_at, dismissed_reason} captured
+        # before the dismiss. Restore via direct UPDATE: snooze+dismiss helpers
+        # only mutate forward, so reverting needs raw SQL.
+        if before_state is None:
+            return  # finding row vanished; nothing to restore
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE researcher_findings SET status = %s, "
+                    "dismissed_at = %s, dismissed_reason = %s "
+                    "WHERE finding_id = %s",
+                    (before_state["status"],
+                     before_state.get("dismissed_at"),
+                     before_state.get("dismissed_reason"),
+                     arguments["finding_id"]),
+                )
+    elif tool_name == "snooze_finding":
+        if before_state is None:
+            return
+        with ctx.db.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE researcher_findings SET status = %s, "
+                    "snoozed_until = %s WHERE finding_id = %s",
+                    (before_state["status"],
+                     before_state.get("snoozed_until"),
+                     arguments["finding_id"]),
+                )
+    elif tool_name in ("add_research_query", "remove_research_query"):
+        # before_state captured the WHOLE portfolio prior to mutation.
+        # Restore by writing it back wholesale via system_config.
+        if before_state is None:
+            return
+        sysconfig.set("researcher_query_portfolio", before_state["portfolio"])
     else:
         raise ValueError(f"no revert handler for tool {tool_name!r}")

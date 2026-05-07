@@ -200,4 +200,232 @@ def build_ba_tools(ctx) -> list[BaseTool]:
             return {"error": f"backtest failed: {type(e).__name__}: {e}"}
         return {**result.to_dict(), "filter_dsl": filter_dsl}
 
-    return [search_market, analyze_corpus, backtest_setup]
+    # ---- Researcher: operator surface (R-Task 8) ----
+
+    from storage.findings import FindingStore
+    from researcher.query_portfolio import (
+        load as _portfolio_load,
+        add as _portfolio_add,
+        remove as _portfolio_remove,
+    )
+    from storage.conversations import SystemConfigStore
+    from assistant.tools import _audited_write
+
+    findings_store = FindingStore(ctx.db)
+    sysconfig = SystemConfigStore(ctx.db)
+
+    def _finding_to_dict(f) -> dict:
+        return {
+            "finding_id": f.finding_id,
+            "detected_at": f.detected_at.isoformat() if f.detected_at else None,
+            "finding_type": f.finding_type,
+            "headline": f.headline,
+            "urgency": f.urgency,
+            "status": f.status,
+            "evidence_job_count": len(f.evidence_job_ids),
+        }
+
+    def _finding_to_full_dict(f) -> dict:
+        d = _finding_to_dict(f)
+        d.update({
+            "why_specific": f.why_specific,
+            "portfolio_tie": f.portfolio_tie,
+            "suggested_action": f.suggested_action,
+            "evidence_job_ids": list(f.evidence_job_ids),
+            "nudged_at": f.nudged_at.isoformat() if f.nudged_at else None,
+            "dismissed_at": f.dismissed_at.isoformat() if f.dismissed_at else None,
+            "dismissed_reason": f.dismissed_reason,
+            "snoozed_until": f.snoozed_until.isoformat() if f.snoozed_until else None,
+        })
+        return d
+
+    @tool
+    def list_findings(
+        status: str = "new",
+        urgency: Optional[str] = None,
+        days_back: int = 7,
+        limit: int = 20,
+    ) -> dict:
+        """List Researcher findings, filtered by status (default 'new') and
+        optional urgency. Returns compact summaries — use get_finding for
+        the full WHY/portfolio/action prose.
+
+        status: 'new' | 'nudged' | 'dismissed' | 'snoozed' (default 'new')
+        urgency: 'this_week' | 'this_month' | 'monitor' (default any)
+        days_back: window in days (default 7)
+        limit: cap on rows returned (default 20)
+        """
+        if status not in ("new", "nudged", "dismissed", "snoozed"):
+            return {"error": f"validation: status must be new|nudged|dismissed|snoozed, got {status!r}"}
+        if urgency is not None and urgency not in ("this_week", "this_month", "monitor"):
+            return {"error": f"validation: urgency must be this_week|this_month|monitor, got {urgency!r}"}
+        rows = findings_store.list_by_status(
+            status, urgency=urgency,
+            days_back=int(days_back), limit=int(limit),
+        )
+        return {
+            "status": status, "urgency": urgency, "days_back": days_back,
+            "count": len(rows),
+            "findings": [_finding_to_dict(f) for f in rows],
+        }
+
+    @tool
+    def get_finding(finding_id: int) -> dict:
+        """Return full detail for one finding: headline, WHY, portfolio
+        tie, suggested action, all evidence job_ids, status timestamps.
+
+        Use this when the operator asks 'tell me more about #N'."""
+        f = findings_store.get(int(finding_id))
+        if f is None:
+            return {"error": f"finding {finding_id} not found"}
+        return _finding_to_full_dict(f)
+
+    @tool
+    def dismiss_finding(finding_id: int, reason: Optional[str] = None) -> dict:
+        """Dismiss a finding so it never re-surfaces. Optionally record a
+        reason for the audit log. Reversible via revert_last_change."""
+        def before():
+            f = findings_store.get(int(finding_id))
+            return None if f is None else {
+                "status": f.status,
+                "dismissed_at": f.dismissed_at.isoformat() if f.dismissed_at else None,
+                "dismissed_reason": f.dismissed_reason,
+            }
+
+        def apply():
+            f = findings_store.get(int(finding_id))
+            if f is None:
+                raise ValueError(f"finding {finding_id} not found")
+            findings_store.mark_dismissed(int(finding_id), reason=reason)
+            return {"finding_id": int(finding_id), "status": "dismissed",
+                    "reason": reason}
+
+        def after():
+            f = findings_store.get(int(finding_id))
+            return None if f is None else {
+                "status": f.status,
+                "dismissed_at": f.dismissed_at.isoformat() if f.dismissed_at else None,
+                "dismissed_reason": f.dismissed_reason,
+            }
+
+        return _audited_write(
+            ctx, tool_name="dismiss_finding",
+            arguments={"finding_id": int(finding_id), "reason": reason},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def snooze_finding(finding_id: int, days: int) -> dict:
+        """Hide a finding for N days. After the date passes, the next
+        Researcher pass auto-promotes it back to 'new'. Reversible via
+        revert_last_change."""
+        if int(days) <= 0:
+            return {"error": "validation: days must be > 0"}
+
+        def before():
+            f = findings_store.get(int(finding_id))
+            return None if f is None else {
+                "status": f.status,
+                "snoozed_until": f.snoozed_until.isoformat() if f.snoozed_until else None,
+            }
+
+        def apply():
+            f = findings_store.get(int(finding_id))
+            if f is None:
+                raise ValueError(f"finding {finding_id} not found")
+            findings_store.mark_snoozed(int(finding_id), days=int(days))
+            return {"finding_id": int(finding_id), "status": "snoozed",
+                    "days": int(days)}
+
+        def after():
+            f = findings_store.get(int(finding_id))
+            return None if f is None else {
+                "status": f.status,
+                "snoozed_until": f.snoozed_until.isoformat() if f.snoozed_until else None,
+            }
+
+        return _audited_write(
+            ctx, tool_name="snooze_finding",
+            arguments={"finding_id": int(finding_id), "days": int(days)},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def list_research_queries() -> dict:
+        """Show the current Researcher query portfolio — what queries the
+        autonomous pass scans every day."""
+        portfolio = _portfolio_load(sysconfig)
+        return {"count": len(portfolio), "queries": portfolio}
+
+    @tool
+    def add_research_query(
+        query: str,
+        payment_verified: Optional[str] = None,
+        t: Optional[str] = None,
+        hourly_rate: Optional[str] = None,
+        amount: Optional[str] = None,
+        proposals: Optional[str] = None,
+        duration_v3: Optional[str] = None,
+    ) -> dict:
+        """Add a query to the Researcher portfolio. The autonomous pass
+        will deep-scan this query every day. Same flat filter args as
+        search_market. Returns {added: bool, query, filters}."""
+        if not query or not query.strip():
+            return {"error": "validation: query is required"}
+        try:
+            filters = _build_filters(
+                payment_verified=payment_verified, t=t,
+                hourly_rate=hourly_rate, amount=amount,
+                proposals=proposals, duration_v3=duration_v3,
+            )
+        except ValueError as e:
+            return {"error": f"validation: {e}"}
+
+        def before():
+            return {"portfolio": _portfolio_load(sysconfig)}
+
+        def apply():
+            added = _portfolio_add(
+                sysconfig, query=query.strip(),
+                filters=filters, added_by="operator",
+            )
+            return {"added": added, "query": query.strip(), "filters": filters}
+
+        def after():
+            return {"portfolio": _portfolio_load(sysconfig)}
+
+        return _audited_write(
+            ctx, tool_name="add_research_query",
+            arguments={"query": query, "filters": filters},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    @tool
+    def remove_research_query(query: str) -> dict:
+        """Remove all entries matching `query` (any filters) from the
+        Researcher portfolio. Reversible via revert_last_change."""
+        if not query or not query.strip():
+            return {"error": "validation: query is required"}
+
+        def before():
+            return {"portfolio": _portfolio_load(sysconfig)}
+
+        def apply():
+            removed = _portfolio_remove(sysconfig, query=query.strip())
+            return {"removed": removed, "query": query.strip()}
+
+        def after():
+            return {"portfolio": _portfolio_load(sysconfig)}
+
+        return _audited_write(
+            ctx, tool_name="remove_research_query",
+            arguments={"query": query},
+            capture_before=before, apply_mutation=apply, capture_after=after,
+        )
+
+    return [
+        search_market, analyze_corpus, backtest_setup,
+        list_findings, get_finding,
+        dismiss_finding, snooze_finding,
+        list_research_queries, add_research_query, remove_research_query,
+    ]

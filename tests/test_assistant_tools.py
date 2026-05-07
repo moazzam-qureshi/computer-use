@@ -466,3 +466,164 @@ def test_backtest_setup_tool_returns_count(ctx):
     assert "sample" in result
     assert "filter_dsl" in result
     assert {"min_hourly": 50.0} in result["filter_dsl"]["all_of"]
+
+
+# ---- Researcher operator surface (R-Task 8) ----
+
+@pytest.fixture
+def seed_finding(ctx):
+    """Insert a throwaway finding for tests; clean up after."""
+    from storage.findings import FindingStore, ResearcherFinding
+    store = FindingStore(ctx.db)
+    fid = store.insert(ResearcherFinding(
+        finding_id=None, detected_at=None,
+        finding_type="emerging_template",
+        headline="TEST-OPSURFACE: 5 jobs want Ragas + LangSmith",
+        why_specific="Three of five mention Ragas; quoted phrases show pattern.",
+        portfolio_tie="Operator portfolio has LangSmith but not Ragas — gap.",
+        suggested_action="Build Ragas demo, push to GitHub, add case study.",
+        urgency="this_week",
+        evidence_job_ids=[f"~test-opsurface-a-{os.getpid()}",
+                          f"~test-opsurface-b-{os.getpid()}"],
+    ))
+    yield fid
+    with ctx.db.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM researcher_findings WHERE finding_id = %s", (fid,))
+
+
+def test_list_findings_returns_compact(ctx, seed_finding):
+    tools = build_tools(ctx)
+    lf = next(t for t in tools if t.name == "list_findings")
+    result = lf.invoke({"status": "new", "days_back": 7})
+    assert "error" not in result
+    assert "findings" in result
+    ids = [f["finding_id"] for f in result["findings"]]
+    assert seed_finding in ids
+    sample = next(f for f in result["findings"] if f["finding_id"] == seed_finding)
+    # Compact shape — no full WHY prose
+    assert "why_specific" not in sample
+    assert "evidence_job_count" in sample
+
+
+def test_list_findings_validates_status(ctx):
+    tools = build_tools(ctx)
+    lf = next(t for t in tools if t.name == "list_findings")
+    result = lf.invoke({"status": "invented_state"})
+    assert "error" in result
+
+
+def test_get_finding_returns_full_prose(ctx, seed_finding):
+    tools = build_tools(ctx)
+    gf = next(t for t in tools if t.name == "get_finding")
+    result = gf.invoke({"finding_id": seed_finding})
+    assert "error" not in result
+    assert "why_specific" in result
+    assert "portfolio_tie" in result
+    assert "suggested_action" in result
+    assert "evidence_job_ids" in result
+    assert len(result["evidence_job_ids"]) == 2
+
+
+def test_get_finding_not_found(ctx):
+    tools = build_tools(ctx)
+    gf = next(t for t in tools if t.name == "get_finding")
+    result = gf.invoke({"finding_id": 999_999_999})
+    assert "error" in result
+
+
+def test_dismiss_finding_round_trip(ctx, seed_finding):
+    from storage.findings import FindingStore
+    store = FindingStore(ctx.db)
+    tools = build_tools(ctx)
+    df = next(t for t in tools if t.name == "dismiss_finding")
+    result = df.invoke({"finding_id": seed_finding, "reason": "not relevant"})
+    assert "error" not in result
+    assert result["status"] == "dismissed"
+    f = store.get(seed_finding)
+    assert f.status == "dismissed"
+    assert f.dismissed_reason == "not relevant"
+
+
+def test_dismiss_finding_revertible(ctx, seed_finding):
+    from storage.findings import FindingStore
+    store = FindingStore(ctx.db)
+    tools = build_tools(ctx)
+    df = next(t for t in tools if t.name == "dismiss_finding")
+    revert = next(t for t in tools if t.name == "revert_last_change")
+
+    df.invoke({"finding_id": seed_finding, "reason": "oops"})
+    assert store.get(seed_finding).status == "dismissed"
+
+    revert.invoke({})
+    assert store.get(seed_finding).status == "new"
+    assert store.get(seed_finding).dismissed_reason is None
+
+
+def test_snooze_finding_round_trip(ctx, seed_finding):
+    from storage.findings import FindingStore
+    store = FindingStore(ctx.db)
+    tools = build_tools(ctx)
+    sf = next(t for t in tools if t.name == "snooze_finding")
+    result = sf.invoke({"finding_id": seed_finding, "days": 7})
+    assert "error" not in result
+    assert result["status"] == "snoozed"
+    f = store.get(seed_finding)
+    assert f.status == "snoozed"
+    assert f.snoozed_until is not None
+
+
+def test_snooze_finding_validates_days(ctx, seed_finding):
+    tools = build_tools(ctx)
+    sf = next(t for t in tools if t.name == "snooze_finding")
+    result = sf.invoke({"finding_id": seed_finding, "days": 0})
+    assert "error" in result
+
+
+def test_query_portfolio_round_trip(ctx):
+    tools = build_tools(ctx)
+    add = next(t for t in tools if t.name == "add_research_query")
+    list_q = next(t for t in tools if t.name == "list_research_queries")
+    remove = next(t for t in tools if t.name == "remove_research_query")
+
+    test_query = f"TEST-PORTFOLIO-{os.getpid()}"
+
+    # Initially absent
+    initial = list_q.invoke({})
+    assert all(e["query"] != test_query for e in initial["queries"])
+
+    # Add
+    add_result = add.invoke({"query": test_query, "payment_verified": "1"})
+    assert "error" not in add_result
+    assert add_result["added"] is True
+    listed = list_q.invoke({})
+    matching = [e for e in listed["queries"] if e["query"] == test_query]
+    assert len(matching) == 1
+    assert matching[0]["filters"] == {"payment_verified": "1"}
+    assert matching[0]["added_by"] == "operator"
+
+    # Remove
+    rm_result = remove.invoke({"query": test_query})
+    assert "error" not in rm_result
+    assert rm_result["removed"] >= 1
+    final = list_q.invoke({})
+    assert all(e["query"] != test_query for e in final["queries"])
+
+
+def test_add_research_query_revertible(ctx):
+    tools = build_tools(ctx)
+    add = next(t for t in tools if t.name == "add_research_query")
+    list_q = next(t for t in tools if t.name == "list_research_queries")
+    revert = next(t for t in tools if t.name == "revert_last_change")
+    remove = next(t for t in tools if t.name == "remove_research_query")
+
+    test_query = f"TEST-PORTFOLIO-REVERT-{os.getpid()}"
+
+    add.invoke({"query": test_query})
+    assert any(e["query"] == test_query for e in list_q.invoke({})["queries"])
+
+    revert.invoke({})
+    assert all(e["query"] != test_query for e in list_q.invoke({})["queries"])
+
+    # Belt-and-suspenders cleanup in case revert didn't fire correctly
+    remove.invoke({"query": test_query})

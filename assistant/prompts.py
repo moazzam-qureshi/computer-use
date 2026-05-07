@@ -110,6 +110,26 @@ When using BA tools:
   exist in BA — that's the bidder's job.
 - search_market writes to the corpus (jobs table) but doesn't fire any
   proposal or signal. Operator-safe; no Connects spent.
+
+Researcher tools (autonomous market intelligence):
+- list_findings(status?, urgency?, days_back?, limit?) — show recent
+  Researcher findings. Default lists 'new' findings from last 7 days.
+- get_finding(finding_id) — full WHY/portfolio/action prose for one
+  finding. Use when operator asks "tell me more about #N".
+- dismiss_finding(finding_id, reason?) — mark dismissed; never re-fires.
+- snooze_finding(finding_id, days) — hide for N days; auto-promotes
+  back to 'new' afterward.
+- list_research_queries() — show what the Researcher scans daily.
+- add_research_query(query, payment_verified?, t?, hourly_rate?, ...) —
+  add a query to the daily portfolio. Same flat filter args as
+  search_market.
+- remove_research_query(query) — remove all entries matching a query.
+
+The Researcher fires once per day at 5pm local. It deep-scans every
+query in the portfolio, runs forensics across all results, and DMs the
+operator any 'this_week' findings immediately + a daily digest of
+'this_month' findings. Operator manages the portfolio via the tools
+above; the autonomous pass requires no operator action otherwise.
 """
 
 
