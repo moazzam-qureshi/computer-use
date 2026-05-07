@@ -17,7 +17,12 @@ from __future__ import annotations
 from typing import Optional
 
 from langchain_core.tools import BaseTool, tool
+from pydantic import ValidationError
 
+from ai.market_analysis import (
+    analyze_corpus as _analyze_corpus,
+    backtest_filter_dsl,
+)
 from upwork.search import ALLOWED_FILTER_KEYS
 from upwork.search_driver import search_and_ingest
 
@@ -112,4 +117,87 @@ def build_ba_tools(ctx) -> list[BaseTool]:
         except Exception as e:  # noqa: BLE001 — surface to operator via tool result
             return {"error": f"search_market failed: {type(e).__name__}: {e}"}
 
-    return [search_market]
+    @tool
+    def analyze_corpus(
+        window_days: int = 30,
+        source_pattern: Optional[str] = None,
+    ) -> dict:
+        """Aggregate the jobs corpus over a recent window. Pure SQL, no LLM.
+
+        window_days: lookback in days (default 30).
+        source_pattern: optional SQL LIKE pattern to scope rows by source
+                        (e.g. 'ba:%RAG%' for BA-RAG-scanned jobs only,
+                        'feed' for bidder-scanned only, None for everything).
+
+        Returns: dict with total_jobs, top_skills, budget percentiles,
+        weekly_volume, client_country_breakdown, payment_verified_share.
+        """
+        try:
+            snapshot = _analyze_corpus(
+                ctx.db,
+                window_days=int(window_days),
+                source_pattern=source_pattern,
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"analyze_corpus failed: {type(e).__name__}: {e}"}
+        return snapshot.to_dict()
+
+    @tool
+    def backtest_setup(
+        min_budget: Optional[float] = None,
+        max_budget: Optional[float] = None,
+        min_hourly: Optional[float] = None,
+        max_hourly: Optional[float] = None,
+        exclude_fixed_under: Optional[float] = None,
+        required_skills: Optional[list] = None,
+        excluded_skills: Optional[list] = None,
+        min_client_spend: Optional[float] = None,
+        payment_verified_required: Optional[bool] = None,
+        excluded_durations: Optional[list] = None,
+        max_post_age_minutes: Optional[int] = None,
+        window_days: int = 30,
+    ) -> dict:
+        """Count corpus jobs that would have matched a hypothetical filter.
+
+        All filter args are FLAT and optional — same shape as the set_setup_*
+        tools, no nested patch dict. Use this BEFORE proposing a setup so
+        you can cite a real backtest count in the proposal.
+
+        Returns: {match_count, total_in_window, sample: [up to 5 jobs]}.
+        """
+        # Lazy import to avoid circular: assistant/tools.py imports ba_tools.
+        from assistant.tools import (
+            FiltersPatch as _FiltersPatch,
+            _patch_to_filter_rules as _patch_to_rules,
+        )
+        patch = {
+            "min_budget": min_budget, "max_budget": max_budget,
+            "min_hourly": min_hourly, "max_hourly": max_hourly,
+            "exclude_fixed_under": exclude_fixed_under,
+            "required_skills": required_skills,
+            "excluded_skills": excluded_skills,
+            "min_client_spend": min_client_spend,
+            "payment_verified_required": payment_verified_required,
+            "excluded_durations": excluded_durations,
+            "max_post_age_minutes": max_post_age_minutes,
+        }
+        # Drop Nones so FiltersPatch validation gets only what was passed.
+        patch = {k: v for k, v in patch.items() if v is not None}
+        try:
+            patch_obj = _FiltersPatch(**patch)
+        except ValidationError as e:
+            return {"error": f"validation: {e}"}
+        rules = _patch_to_rules(patch_obj)
+        if not rules:
+            return {"error": "no filter args provided; pass at least one"}
+        filter_dsl = {"all_of": rules}
+        try:
+            result = backtest_filter_dsl(
+                ctx.db, filter_dsl=filter_dsl,
+                window_days=int(window_days),
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"backtest failed: {type(e).__name__}: {e}"}
+        return {**result.to_dict(), "filter_dsl": filter_dsl}
+
+    return [search_market, analyze_corpus, backtest_setup]

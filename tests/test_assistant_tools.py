@@ -432,3 +432,37 @@ def test_search_market_filter_assembly():
         amount=None, proposals=None, duration_v3=None,
     )
     assert empty == {}
+
+
+def test_analyze_corpus_tool_returns_dict(ctx):
+    """The tool wraps ai.market_analysis.analyze_corpus and returns its dict."""
+    tools = build_tools(ctx)
+    ac = next(t for t in tools if t.name == "analyze_corpus")
+    result = ac.invoke({"window_days": 30})
+    assert "error" not in result
+    assert "total_jobs" in result
+    assert "top_skills" in result
+    assert "budget" in result
+    assert "weekly_volume" in result
+    assert "payment_verified_share" in result
+
+
+def test_backtest_setup_tool_requires_at_least_one_filter(ctx):
+    tools = build_tools(ctx)
+    bs = next(t for t in tools if t.name == "backtest_setup")
+    result = bs.invoke({})  # no filter args
+    assert "error" in result
+    assert "no filter args" in result["error"]
+
+
+def test_backtest_setup_tool_returns_count(ctx):
+    """End-to-end: tool accepts flat filter args, returns match_count."""
+    tools = build_tools(ctx)
+    bs = next(t for t in tools if t.name == "backtest_setup")
+    result = bs.invoke({"min_hourly": 50, "window_days": 30})
+    assert "error" not in result
+    assert "match_count" in result
+    assert "total_in_window" in result
+    assert "sample" in result
+    assert "filter_dsl" in result
+    assert {"min_hourly": 50.0} in result["filter_dsl"]["all_of"]

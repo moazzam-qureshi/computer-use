@@ -90,6 +90,16 @@ BA tools (market intelligence):
     duration_v3='week' | 'month' | 'semester' | 'ongoing'
   Use this when the operator wants to scan a part of the market we don't
   have data on yet, or wants a fresh card-level snapshot of a niche.
+- analyze_corpus(window_days?, source_pattern?) — pure SQL aggregation
+  over the jobs table. Returns top skills, budget percentiles (P25/P50/P75),
+  weekly volume, client country breakdown, payment-verified share. No
+  LLM, no UIA — fast and cheap. Use to answer "what does the market
+  look like?" and to feed proposers with evidence.
+- backtest_setup(min_hourly?, min_budget?, required_skills?, ...) — count
+  corpus jobs in a window that would have matched a hypothetical filter.
+  Same flat filter args as the set_setup_* tools. Returns match_count,
+  total_in_window, and a 5-job sample. ALWAYS run this before proposing
+  a setup so the proposal can cite a real backtest count.
 
 When using BA tools:
 - The active goal IS the threshold definition. "High-ticket" = whatever
